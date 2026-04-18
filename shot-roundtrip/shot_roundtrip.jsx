@@ -1088,6 +1088,13 @@ NOTES
             }
             return n;
         }
+        // Snapshot the mainComp selection — our converter flips layer/property
+        // selection flags to dodge the "hidden property" error, which collapses
+        // the user's original selection in the UI. Restore it after the loop.
+        var preConvertSelection = [];
+        for (var pcs = 0; pcs < mainComp.selectedLayers.length; pcs++) {
+            preConvertSelection.push(mainComp.selectedLayers[pcs]);
+        }
         var autoConverted = 0;
         for (var cri = 0; cri < selLayers.length; cri++) {
             var crl = selLayers[cri].layer;
@@ -1097,6 +1104,12 @@ NOTES
                 autoConverted += convertAllStretchReversalsInComp(crl.source);
             }
         }
+        try {
+            for (var dse = 1; dse <= mainComp.numLayers; dse++) mainComp.layer(dse).selected = false;
+            for (var rse = 0; rse < preConvertSelection.length; rse++) {
+                try { preConvertSelection[rse].selected = true; } catch(eSelRestore) {}
+            }
+        } catch(eSelSnap) {}
 
         var trAffected   = []; // top-level, fed to autoPrecomposeTrimmed
         var reversedList = []; // drives the loud confirm dialog

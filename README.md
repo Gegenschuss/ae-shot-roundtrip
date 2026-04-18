@@ -337,61 +337,62 @@ premiere-trim-handles-close-gaps/    # Premiere Pro companion extension
 
 ## FAQ
 
-**Do I have to create `_grades/` myself, or does the script make it?**
-The script makes it. The first time you run **Import Renders &
-Grades**, it creates `Roundtrip/_grades/` and drops a `README.txt`
-there describing the Resolve Deliver preset and the shot-prefix
-naming convention. After that, you (or Resolve's deliver page)
-fill it with graded clips. Without any grades, only VFX renders
-are imported — everything else keeps working.
+**Is it going to mess up my project?**
+Save first, but no — a full Shot Roundtrip run is wrapped in a single
+undo group, so one Cmd/Ctrl+Z rolls back the whole thing. On disk,
+the only writes go into your chosen `Roundtrip/` folder (plate
+renders + a few auto-generated `README.txt` scaffolds). Nothing else
+is touched.
 
-**Can I change the shot prefix or renumber shots mid-project?**
-No. The prefix+number is the stable ID that ties AE comps, disk
-folders, and Premiere clips together. Pick a unique prefix once per
-project (e.g. `KM_`, `NM_`) and never change it. For new shots, use
-the gaps — `shot_015` slots between `_010` and `_020`. For dropped
-shots, just delete the comp and folder; numbering gaps are harmless.
+**Do I have to use Premiere?**
+No. The AE side works standalone. The Premiere extension only
+automates trimming handles + closing gaps once you drop the Dynamic
+Link comps into a sequence — do it by hand if you prefer.
 
-**My VFX returns are misaligned after Import Renders & Grades. What
-happened?**
-Almost always one of: (a) the plate layer's in-point was moved inside
-the `_comp`, (b) the `_comp` was renamed, or (c) the render filename
-no longer starts with the shot prefix. All three break the alignment
-contract. Restore the original plate in/out, keep the `_comp` name,
-and make sure renders land in `{shots}/{shot}/render/`.
+**Can I rename shots or change the prefix halfway through?**
+Don't. The prefix + number is what ties AE comps, disk folders, and
+Premiere clips together — rename anything and the roundtrip loses
+the thread. Pick a unique prefix once per project (e.g. `KM_`,
+`NM_`) and stick with it. Adding new shots? Use the gaps — shots are
+numbered in tens, so `shot_015` slots between `_010` and `_020`.
+Dropping shots? Just delete the comp and folder. Gaps in numbering
+don't hurt anything.
 
-**Do I need the Premiere extension to use the roundtrip?**
-No. The AE side works standalone — the extension only automates
-trimming handles and closing gaps once you've dropped the Dynamic
-Link comps into a Premiere sequence. You can do that trimming by hand
-if you prefer.
+**What happens with time-remapped or reversed clips?**
+Forward ramps and speed changes get handled automatically — top-level
+ones get auto-precomposed so the plate renders forward at 100%.
+Reversed clips trigger a warning dialog so you can confirm the
+reversal is really intentional (reversed plates break tracking,
+motion vectors, particles, smoke — they almost never ship that way).
+If you hit Continue, negative-stretch reversals are auto-rewritten
+as equivalent time remaps before the roundtrip proceeds.
 
-**What if a clip in the edit is time-remapped or reversed?**
-Forward time remaps and non-negative stretches are handled
-automatically (top-level ones get precomposed so the plate renders
-forward at 100%). Reversed clips trigger a warning dialog so you can
-verify the reversal is really intentional — reversed plates break
-tracking, motion vectors, and direction-sensitive VFX, so they
-almost never ship reversed. If you confirm, negative-stretch
-reversals are auto-rewritten as equivalent time remaps before the
-roundtrip proceeds. See the
-[Time-remap / reversal preflight](#tools) notes for details.
+**My renders came back out of sync — what did I break?**
+Almost always one of: (a) the plate layer's in-point got nudged
+inside the `_comp`, (b) the `_comp` got renamed, or (c) the render
+filename no longer starts with the shot prefix. All three break the
+alignment contract. Restore the plate in/out, keep the `_comp` name
+intact, and make sure renders land in `{shots}/{shot}/render/`.
 
-**Does it support image sequences (EXR, DPX) as plates?**
-Yes. Shot Roundtrip and Import Renders & Grades both handle movie
-files and image sequences. For renders, point the Deadline/Nuke
+**The edit changed — do I have to redo everything?**
+No. Re-run Shot Roundtrip on just the new or changed layers. As long
+as the prefix and starting number are the same, it finds the
+existing `_comp` and updates it instead of making duplicates. That's
+the intended workflow for last-minute shot additions.
+
+**Does it work with EXR / DPX / image sequences?**
+Yes, for both plates and VFX returns. Point your Nuke / Deadline
 output at `{shots}/{shot}/render/` and make sure the filename starts
-with the shot name.
+with the shot name — the rest is automatic.
 
-**Can I re-run Shot Roundtrip on a layer I already processed?**
-Yes — as long as you keep the same prefix and starting number, the
-roundtrip finds the existing `_comp` and updates it instead of
-creating a duplicate. This is how you extend a project with new
-shots: select only the new layers and run again.
+**Do I need to create the `_grades/` folder myself?**
+No. Import Renders & Grades creates `Roundtrip/_grades/` the first
+time you run it, with a `README.txt` describing the Resolve Deliver
+preset and filename convention. No grades yet? Fine — only VFX
+renders get imported, everything else keeps working.
 
-**Does this work on Linux?**
-After Effects isn't supported on Linux by Adobe, so no. macOS and
-Windows only.
+**Can I run this on Linux?**
+After Effects doesn't run on Linux, so no. macOS and Windows only.
 
 ---
 
