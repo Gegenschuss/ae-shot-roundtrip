@@ -638,10 +638,25 @@ NOTES
                 var startT = 0;
                 var endT = 0;
                 if (layer.timeRemapEnabled) {
-                    startT = layer.property("Time Remap").valueAtTime(layer.inPoint, false);
-                    endT = layer.property("Time Remap").valueAtTime(layer.outPoint, false);
+                    var tr = layer.property("Time Remap");
+                    if (tr.numKeys >= 1) {
+                        // Walk every key; min/max of their values is the true source range the
+                        // remap covers. Avoids valueAtTime's linear extrapolation past the last
+                        // key, which inflates range.end for reversed-stretch conversions (last
+                        // key sits at compEnd - frameDur, not at layer.outPoint).
+                        startT = tr.keyValue(1);
+                        endT   = tr.keyValue(1);
+                        for (var ki = 2; ki <= tr.numKeys; ki++) {
+                            var kv = tr.keyValue(ki);
+                            if (kv < startT) startT = kv;
+                            if (kv > endT)   endT   = kv;
+                        }
+                    } else {
+                        startT = tr.valueAtTime(layer.inPoint,  false);
+                        endT   = tr.valueAtTime(layer.outPoint, false);
+                    }
                 } else {
-                    var factor = 100 / layer.stretch; 
+                    var factor = 100 / layer.stretch;
                     startT = (layer.inPoint - layer.startTime) * factor;
                     endT = (layer.outPoint - layer.startTime) * factor;
                 }
@@ -651,10 +666,23 @@ NOTES
         }
 
         // Maps a time in the containing comp to a time in the layer's source,
-        // respecting time remap when enabled and stretch otherwise.
+        // respecting time remap when enabled and stretch otherwise. For time-remapped
+        // layers, clamp compTime outside the key span to the first/last key value so
+        // handle-offset math doesn't extrapolate past the reversed-remap's valid
+        // source window (AE's default behaviour past the last key on time remap is
+        // to hold, which would freeze handle frames).
         function mapTimeToSource(layer, compTime) {
             if (layer.timeRemapEnabled) {
-                try { return layer.property("ADBE Time Remapping").valueAtTime(compTime, false); } catch(e) {}
+                try {
+                    var tr = layer.property("ADBE Time Remapping");
+                    if (tr.numKeys >= 2) {
+                        var firstT = tr.keyTime(1);
+                        var lastT  = tr.keyTime(tr.numKeys);
+                        if (compTime <= firstT) return tr.keyValue(1);
+                        if (compTime >= lastT)  return tr.keyValue(tr.numKeys);
+                    }
+                    return tr.valueAtTime(compTime, false);
+                } catch(e) {}
             }
             var stretch = (layer.stretch !== 0) ? layer.stretch : 100;
             return (compTime - layer.startTime) * (100 / stretch);
