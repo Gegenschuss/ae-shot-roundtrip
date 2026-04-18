@@ -239,6 +239,75 @@ NOTES
             if (hint) msg += "\n\n" + hint;
             alert(msg);
         }
+
+        // Non-modal progress palette so the user can tell the script is still
+        // alive during the long prep + post-render phases. Returns an object
+        // with update/close. If palette creation fails for any reason, all
+        // methods become no-ops — the roundtrip runs the same, just silent.
+        // Palette is invisible during AE's renderQueue.render() since that
+        // call blocks the script thread; AE's own render window takes over
+        // the UI during that phase.
+        function makeProgressPanel() {
+            var win = null, statusTxt = null, detailTxt = null, bar = null, alive = false;
+            var cancelled = false, btnCancel = null;
+            try {
+                win = new Window("palette", "Gegenschuss \u00b7 Shot Roundtrip", undefined, { resizeable: false });
+                win.orientation = "column";
+                win.alignChildren = ["fill", "top"];
+                win.margins = 14; win.spacing = 6;
+                win.preferredSize.width = 440;
+                statusTxt = win.add("statictext", undefined, "Starting roundtrip\u2026");
+                statusTxt.alignment = ["fill", "top"];
+                detailTxt = win.add("statictext", undefined, " ");
+                detailTxt.alignment = ["fill", "top"];
+                bar = win.add("progressbar", undefined, 0, 100);
+                bar.preferredSize = [410, 8];
+                var btnGrp = win.add("group");
+                btnGrp.orientation = "row"; btnGrp.alignment = ["right", "top"];
+                btnCancel = btnGrp.add("button", undefined, "Cancel");
+                btnCancel.preferredSize = [90, 24];
+                btnCancel.onClick = function () {
+                    cancelled = true;
+                    try { btnCancel.text = "Cancelling\u2026"; btnCancel.enabled = false; win.update(); } catch (eCl) {}
+                };
+                win.show();
+                alive = true;
+            } catch (eProg) { alive = false; }
+            return {
+                update: function (status, detail, pct) {
+                    if (!alive) return;
+                    try {
+                        if (typeof status === "string") statusTxt.text = status;
+                        if (typeof detail === "string") detailTxt.text = (detail.length ? detail : " ");
+                        if (typeof pct === "number") bar.value = Math.max(0, Math.min(100, pct));
+                        win.update();
+                    } catch (e) {}
+                },
+                isCancelled: function () { return cancelled; },
+                close: function () {
+                    if (!alive) return;
+                    alive = false;
+                    try { win.close(); } catch (e) {}
+                }
+            };
+        }
+        // No-op default so any early-return paths before the real palette is
+        // created don't crash on progress.update/close/isCancelled calls.
+        var progress = { update: function(){}, isCancelled: function(){ return false; }, close: function(){} };
+
+        // Cancel-check helper. Call at the top of each long loop iteration:
+        //   if (cancelCheck()) return;
+        // The return triggers any enclosing try/finally, which correctly ends
+        // the active undo group, so the user can Cmd/Ctrl+Z to roll back
+        // partial work. Doesn't work during renderQueue.render() — that call
+        // blocks the script and AE's own render window takes over, including
+        // its own cancel button.
+        function cancelCheck() {
+            if (!progress.isCancelled()) return false;
+            progress.close();
+            alert("Roundtrip cancelled by user.\n\nIf any comps or renders were already created, use Cmd/Ctrl+Z to undo them.");
+            return true;
+        }
         function pad(n, s) { var str = "" + n; while (str.length < s) str = "0" + str; return str; }
         function getBinFolder(name) { for (var i=1;i<=proj.numItems;i++) { if(proj.item(i).name==name && proj.item(i) instanceof FolderItem) return proj.item(i); } return proj.items.addFolder(name); }
         // "cut in"/"cut out" markers created here use protectedRegion so a
@@ -300,7 +369,7 @@ NOTES
         }
 
         // Precompose Trimmed — auto-precompose layers with time remap or stretch.
-        // Same algorithm as precompose-trimmed/precompose_trimmed.jsx:
+        // Same algorithm as helpers/precompose_trimmed.jsx:
         // descending index order, move all attributes, full comp duration, trim to original in/out.
         // Returns true on success, false on failure.
         function autoPrecomposeTrimmed(comp, layerInfos) {
@@ -321,9 +390,14 @@ NOTES
 
             layerInfos.sort(function(a, b) { return b.index - a.index; });
             app.beginUndoGroup("Auto-Precompose for Roundtrip");
+            var aAutoPCBin = null; // lazily created on first precompose
             try {
                 for (var ap = 0; ap < layerInfos.length; ap++) {
+                    if (progress.isCancelled()) { app.endUndoGroup(); return false; }
                     var aInfo = layerInfos[ap];
+                    try { progress.update(null,
+                        "layer " + (ap + 1) + " of " + layerInfos.length + ": " + aInfo.name,
+                        9 + 2 * (ap / Math.max(1, layerInfos.length))); } catch(eProgAP) {}
 
                     var aBaseName = aInfo.name + "_precomp";
                     var aName = aBaseName;
@@ -337,6 +411,14 @@ NOTES
 
                     var aNewComp = comp.layers.precompose([aInfo.index], aName, true);
                     aNewComp.duration = comp.duration;
+
+                    // File the new precomp into /Shots/autoPrecomps/ instead of
+                    // leaving it stranded at the project root alongside whatever
+                    // the user had organised there.
+                    try {
+                        if (!aAutoPCBin) aAutoPCBin = getShotBin(getBinFolder("Shots"), "autoPrecomps");
+                        aNewComp.parentFolder = aAutoPCBin;
+                    } catch (eBin) {}
 
                     var aPrecompLayer = null;
                     for (var aj = 1; aj <= comp.numLayers; aj++) {
@@ -451,7 +533,28 @@ NOTES
                                 }
                             }
                         } else if (entry.value !== undefined && !entry.isReadOnly) {
-                            try { dp.setValue(entry.value); } catch(e) {}
+                            var appliedVal = entry.value;
+                            if (appliedVal instanceof File) {
+                                // Rebuild the File with its absolute fsName so AE doesn't
+                                // re-resolve via the destination comp's relative-path lookup —
+                                // that re-resolution is what triggers the "Locate LUT file"
+                                // dialog on Apply Color LUT and other file-bound effects. If
+                                // the file is genuinely missing, skip the write entirely
+                                // rather than fire the dialog and block the batch; the
+                                // effect still exists on the destination with an empty slot
+                                // that the user can re-point post-roundtrip.
+                                var absFsName = null;
+                                try { absFsName = appliedVal.fsName; } catch (eFN) {}
+                                if (absFsName) {
+                                    var freshFile = new File(absFsName);
+                                    if (freshFile.exists) {
+                                        appliedVal = freshFile;
+                                    } else {
+                                        continue;
+                                    }
+                                }
+                            }
+                            try { dp.setValue(appliedVal); } catch(e) {}
                         }
                         if (entry.expression !== undefined) {
                             try { dp.expression = entry.expression; dp.expressionEnabled = true; } catch(e) {}
@@ -554,18 +657,30 @@ NOTES
             }
 
             // ── Effects ───────────────────────────────────────────────────────────
+            // Wrap the copy loop in beginSuppressDialogs as a safety net: any
+            // file-type property that slips past applyPropertyGroup's fsName
+            // rewrap (or any other effect setValue that wants to pop a modal)
+            // should fail silently instead of blocking the batch. The
+            // `suppressed` flag keeps this a no-op on AE versions where the API
+            // isn't available.
             var srcFx = srcLayer.property("ADBE Effect Parade");
             if (srcFx && dstFx) {
-                for (var e = srcFx.numProperties; e >= 1; e--) {
-                    var se = srcFx.property(e);
-                    if (!se) continue;
-                    var snap;
-                    try { snap = serializePropertyGroup(se); } catch(e2) { continue; }
-                    try {
-                        var de = dstFx.addProperty(se.matchName);
-                        applyPropertyGroup(snap, de, timeOffset);
-                        se.remove();
-                    } catch(e2) {}
+                var suppressed = false;
+                try { app.beginSuppressDialogs(); suppressed = true; } catch (eSD) {}
+                try {
+                    for (var e = srcFx.numProperties; e >= 1; e--) {
+                        var se = srcFx.property(e);
+                        if (!se) continue;
+                        var snap;
+                        try { snap = serializePropertyGroup(se); } catch(e2) { continue; }
+                        try {
+                            var de = dstFx.addProperty(se.matchName);
+                            applyPropertyGroup(snap, de, timeOffset);
+                            se.remove();
+                        } catch(e2) {}
+                    }
+                } finally {
+                    if (suppressed) { try { app.endSuppressDialogs(false); } catch (eED) {} }
                 }
             }
 
@@ -979,6 +1094,9 @@ NOTES
 
         selLayers.sort(function(a, b) { return a.layer.index - b.layer.index; });
 
+        progress = makeProgressPanel();
+        progress.update("Preflight: scanning " + selLayers.length + " selected layer(s)\u2026", "", 2);
+
         // ── Preflight: time remap or time stretch ─────────────────────────────
         // Scan not just the selected (top-level) layers but the full precomp
         // hierarchy below them. A reversed precomp nested two levels deep
@@ -1188,7 +1306,12 @@ NOTES
             preConvertSelection.push(mainComp.selectedLayers[pcs]);
         }
         var autoConverted = 0;
+        progress.update("Converting any reversed clips to time remaps\u2026", "0 of " + selLayers.length, 5);
         for (var cri = 0; cri < selLayers.length; cri++) {
+            if (cancelCheck()) return;
+            progress.update(null,
+                "layer " + (cri + 1) + " of " + selLayers.length,
+                5 + 2 * (cri / Math.max(1, selLayers.length)));
             var crl = selLayers[cri].layer;
             if (!isScanRelevantLayer(crl)) continue;
             if (convertStretchReversalToRemap(crl)) autoConverted++;
@@ -1222,30 +1345,57 @@ NOTES
         // effects proceed silently and show up as passive info next to the
         // shot in the Confirm Shots dialog.
         if (reversedList.length > 0) {
-            if (!confirmReversedClips(reversedList)) return; // user canceled
+            // Close palette before modal so macOS hands focus to the dialog.
+            progress.close();
+            var revOk = confirmReversedClips(reversedList);
+            progress = makeProgressPanel();
+            if (!revOk) { progress.close(); return; } // user canceled
+            progress.update("Reversed clips confirmed, continuing\u2026", "", 8);
         }
         if (trAffected.length > 0) {
-            if (!autoPrecomposeTrimmed(mainComp, trAffected)) return;
+            progress.update("Auto-precomposing " + trAffected.length + " time-remapped layer(s)\u2026", "", 9);
+            if (!autoPrecomposeTrimmed(mainComp, trAffected)) {
+                // autoPrecomposeTrimmed returns false on internal error OR on
+                // cancel. Surface the cancel message if that's why we stopped.
+                if (cancelCheck()) return;
+                progress.close(); return;
+            }
 
-            // Re-scan the selection — the precomposed layers replaced the originals
+            // Re-scan the selection — the precomposed layers replaced the originals.
+            // Apply the same filter as the initial scan: auto-precompose's selection
+            // restoration puts every pre-existing selection back on the layer panel,
+            // including shape/text/null/adjustment/guide layers the user happened to
+            // have selected alongside the real shots. Without this filter those come
+            // through as roundtrip candidates and crash downstream on null .source.
             selLayers = [];
             for (var ri = 1; ri <= mainComp.numLayers; ri++) {
-                if (mainComp.layer(ri).selected) {
-                    var rLayer = mainComp.layer(ri);
-                    var rIsPrecomp = rLayer.source instanceof CompItem;
+                if (!mainComp.layer(ri).selected) continue;
+                var rLayer = mainComp.layer(ri);
+                if (!rLayer.hasVideo || rLayer.guideLayer || rLayer.adjustmentLayer || rLayer.nullLayer) continue;
+                if (rLayer.source === null) { skippedLayers.push(rLayer.name + " (Shape/Text)"); continue; }
+                var rIsFile = false;
+                try { if (rLayer.source.mainSource && rLayer.source.mainSource.file) rIsFile = true; } catch(eRIS) {}
+                var rIsPrecomp = (rLayer.source instanceof CompItem);
+                if (rIsFile || rIsPrecomp) {
                     selLayers.push({ layer: rLayer, isPrecomp: rIsPrecomp });
+                } else {
+                    skippedLayers.push(rLayer.name + " (Solid/Shape/Text)");
                 }
             }
             if (selLayers.length === 0) {
                 alert("No layers selected after auto-precompose. Please select the precomposed layers and try again.");
+                progress.close();
                 return;
             }
         }
 
         // Expand precomp entries: each footage layer found inside becomes its own shot.
         // Direct footage entries pass through unchanged.
+        progress.update("Expanding precomps and resolving source ranges\u2026", "0 of " + selLayers.length, 11);
         var expandedLayers = [];
         for (var ei = 0; ei < selLayers.length; ei++) {
+            if (cancelCheck()) return;
+            progress.update(null, (ei + 1) + " of " + selLayers.length + " selected layers walked", 11 + (5 * ei / Math.max(1, selLayers.length)));
             var eItem = selLayers[ei];
             if (!eItem.isPrecomp) {
                 expandedLayers.push({
@@ -1306,7 +1456,7 @@ NOTES
         if (expandedLayers.length === 0) {
             var msg = "Keine gültigen Layer gefunden.";
             if (skippedLayers.length > 0) msg += "\n" + skippedLayers.length + " Layer wurden übersprungen.";
-            alert(msg); return; 
+            alert(msg); progress.close(); return;
         }
 
         // ── Confirm found shots before doing anything ──────────────────────────
@@ -1323,21 +1473,29 @@ NOTES
             expandedLayers[cfi].overscan = false;
         }
 
-        // Each row: { cols:[name, info, path, osMarker], layerIdx } — layerIdx=-1 for skip rows
+        // Each row: { cols:[shot, frames, res, notice, source, os], layerIdx }
+        // layerIdx=-1 for skip rows (shot comp already exists).
         var confRows = [];
         var confTotalFrames = 0;
-        var confNameMaxLen = 0;
-        var confInfoMaxLen = 0;
-        var confPathMaxLen = 0;
+        var confNameMaxLen   = 0;
+        var confFramesMaxLen = 0;
+        var confResMaxLen    = 0;
+        var confNoticeMaxLen = 0;
+        var confPathMaxLen   = 0;
 
+        progress.update("Preparing Confirm Shots dialog\u2026", "0 of " + expandedLayers.length, 12);
+        try {
         for (var cfi = 0; cfi < expandedLayers.length; cfi++) {
+            if (cancelCheck()) return;
+            // Per-row update so a hang/crash surfaces the exact offending row.
+            progress.update(null, "row " + (cfi + 1) + " of " + expandedLayers.length, 12 + (2 * cfi / Math.max(1, expandedLayers.length)));
             var cfNum  = startNum + cfi * increment;
             var cfName = shotPrefix + pad(cfNum, 3);
             var cfItem = expandedLayers[cfi];
 
             // Already exists?
             if (!!confExisting[cfName + "_comp"]) {
-                confRows.push({ cols: [cfName, "\u2014 skip", "already exists", ""], layerIdx: -1 });
+                confRows.push({ cols: [cfName, "", "", "\u2014 skip", "already exists", ""], layerIdx: -1 });
                 if (cfName.length > confNameMaxLen) confNameMaxLen = cfName.length;
                 continue;
             }
@@ -1365,54 +1523,62 @@ NOTES
             // Breadcrumb path — shorten long chains to "first > … > last"
             var cfPath;
             if (cfItem.isPrecomp) {
-                var cfParts = cfItem.found.breadcrumb.concat([cfItem.found.footageLayer.source.name]);
+                var cfSrcName = (cfItem.found.footageLayer.source && cfItem.found.footageLayer.source.name) || "(no source)";
+                var cfParts = cfItem.found.breadcrumb.concat([cfSrcName]);
                 if (cfParts.length > 3) {
                     cfPath = cfParts[0] + " > \u2026 > " + cfParts[cfParts.length - 1];
                 } else {
                     cfPath = cfParts.join(" > ");
                 }
             } else {
-                cfPath = cfItem.layer.source.name;
+                cfPath = (cfItem.layer.source && cfItem.layer.source.name) || "(no source)";
             }
 
-            var cfInfo = cfCutFrames + "f";
-            if (cfSrcW > 0) cfInfo += "  " + cfSrcW + "\u00d7" + cfSrcH;
-            if (cfFpsMismatch) cfInfo += "  !!! fps " + cfSrcFps + "\u2260" + cfFps;
+            var cfFrames = cfCutFrames + "f";
+            var cfRes    = (cfSrcW > 0) ? (cfSrcW + "\u00d7" + cfSrcH) : "";
 
-            // Time-effect tags. Reversed effects are already surfaced via the
-            // loud dialog at the top of the run, but we include them here too
-            // so each affected shot carries a visible reminder during the
-            // final confirmation step — easy to lose track of which layer
-            // triggered the warning otherwise. Non-reversed ramps/stretches
-            // are typically editorial intent and just show passively.
-            var cfTimeTags = [];
+            // Notice column: fps mismatch + time-effect tags. Reversed effects are
+            // already surfaced via the loud dialog at the top of the run; we repeat
+            // them here per-shot so it's clear which shots the warning covered.
+            var cfNoticeParts = [];
+            if (cfFpsMismatch) cfNoticeParts.push("!!! fps " + cfSrcFps + "\u2260" + cfFps);
             var cfEffects = scanSelLayerForEffects(cfItem.layer);
             for (var cfe = 0; cfe < cfEffects.length; cfe++) {
-                cfTimeTags.push(cfEffects[cfe].label);
+                cfNoticeParts.push(cfEffects[cfe].label);
             }
-            if (cfTimeTags.length > 0) cfInfo += "  " + cfTimeTags.join(" ");
+            var cfNotice = cfNoticeParts.join("  ");
 
             var cfOsMark = cfItem.overscan ? "\u2715" : "";
-            confRows.push({ cols: [cfName, cfInfo, cfPath, cfOsMark], layerIdx: cfi });
-            if (cfName.length > confNameMaxLen) confNameMaxLen = cfName.length;
-            if (cfInfo.length > confInfoMaxLen) confInfoMaxLen = cfInfo.length;
-            if (cfPath.length > confPathMaxLen) confPathMaxLen = cfPath.length;
+            confRows.push({ cols: [cfName, cfFrames, cfRes, cfNotice, cfPath, cfOsMark], layerIdx: cfi });
+            if (cfName.length   > confNameMaxLen)   confNameMaxLen   = cfName.length;
+            if (cfFrames.length > confFramesMaxLen) confFramesMaxLen = cfFrames.length;
+            if (cfRes.length    > confResMaxLen)    confResMaxLen    = cfRes.length;
+            if (cfNotice.length > confNoticeMaxLen) confNoticeMaxLen = cfNotice.length;
+            if (cfPath.length   > confPathMaxLen)   confPathMaxLen   = cfPath.length;
+        }
+        } catch (eConfRows) {
+            try { progress.close(); } catch(eCl){}
+            alert("Preparing Confirm Shots dialog failed at row " + (typeof cfi === "number" ? (cfi + 1) : "?") + ":\n\n" +
+                  eConfRows.message + "\nLine: " + eConfRows.line);
+            return;
         }
 
         var screenW = 1920;
         try { screenW = $.screens[0].right - $.screens[0].left; } catch(e) {}
         var maxDlgW = Math.round(screenW * 0.9);
 
-        var confColW1 = Math.max(confNameMaxLen * 9 + 24, 80);
-        var confColW2 = Math.max(confInfoMaxLen * 7 + 12, 100);
-        var confColW4 = 32;
-        var confColW3 = Math.max(confPathMaxLen * 8 + 24, 260);
-        // Give source column whatever space remains after the fixed columns
-        var confFixedW = confColW1 + confColW2 + confColW4 + 50;
-        confColW3 = Math.min(confColW3, maxDlgW - confFixedW);
-        confColW3 = Math.max(confColW3, 260);
-        var confDlgW  = Math.min(confFixedW + confColW3, maxDlgW);
-        confDlgW = Math.max(confDlgW, 700);
+        var confColShot   = Math.max(confNameMaxLen   * 9 + 24, 80);
+        var confColFrames = Math.max(confFramesMaxLen * 8 + 16, 60);
+        var confColRes    = Math.max(confResMaxLen    * 8 + 16, 90);
+        var confColNotice = Math.max(confNoticeMaxLen * 7 + 16, 80);
+        var confColOs     = 32;
+        var confColSource = Math.max(confPathMaxLen   * 8 + 24, 260);
+        // Source column gets whatever space remains after the fixed columns.
+        var confFixedW = confColShot + confColFrames + confColRes + confColNotice + confColOs + 60;
+        confColSource  = Math.min(confColSource, maxDlgW - confFixedW);
+        confColSource  = Math.max(confColSource, 260);
+        var confDlgW   = Math.min(confFixedW + confColSource, maxDlgW);
+        confDlgW = Math.max(confDlgW, 800);
 
         var confDlg = new Window("dialog", "Confirm Shots");
         confDlg.orientation = "column"; confDlg.alignChildren = ["fill", "top"];
@@ -1432,19 +1598,21 @@ NOTES
 
         var confLB = confDlg.add("listbox", undefined, [], {
             multiselect: true,
-            numberOfColumns: 4,
+            numberOfColumns: 6,
             showHeaders: true,
-            columnTitles: ["shot", "info", "source", "os"],
-            columnWidths: [confColW1, confColW2, confColW3, confColW4]
+            columnTitles: ["shot", "frames", "res", "notice", "source", "os"],
+            columnWidths: [confColShot, confColFrames, confColRes, confColNotice, confColSource, confColOs]
         });
         var confLBH = Math.max(confRows.length * 22 + 40, 200);
         confLBH = Math.min(confLBH, 600);
         confLB.preferredSize = [confDlgW, confLBH];
         for (var cfi = 0; cfi < confRows.length; cfi++) {
             var cfRow = confLB.add("item", confRows[cfi].cols[0]);
-            cfRow.subItems[0].text = confRows[cfi].cols[1];
-            cfRow.subItems[1].text = confRows[cfi].cols[2];
-            cfRow.subItems[2].text = confRows[cfi].cols[3];
+            cfRow.subItems[0].text = confRows[cfi].cols[1]; // frames
+            cfRow.subItems[1].text = confRows[cfi].cols[2]; // res
+            cfRow.subItems[2].text = confRows[cfi].cols[3]; // notice
+            cfRow.subItems[3].text = confRows[cfi].cols[4]; // source
+            cfRow.subItems[4].text = confRows[cfi].cols[5]; // os
         }
 
         // Footer + toggle button
@@ -1470,7 +1638,7 @@ NOTES
                 var ri = confRows[selIndices[si]];
                 if (ri.layerIdx < 0) continue;
                 expandedLayers[ri.layerIdx].overscan = !expandedLayers[ri.layerIdx].overscan;
-                confLB.items[selIndices[si]].subItems[2].text = expandedLayers[ri.layerIdx].overscan ? "\u2715" : "";
+                confLB.items[selIndices[si]].subItems[4].text = expandedLayers[ri.layerIdx].overscan ? "\u2715" : "";
             }
             // Force ScriptUI to repaint the listbox — it won't update subItem text
             // while items are selected, so briefly clear and restore selection.
@@ -1486,12 +1654,23 @@ NOTES
         } catch(eKD) {}
         confCancel.onClick = function() { confDlg.close(2); };
         confOk.onClick     = function() { confDlg.close(1); };
-        if (confDlg.show() !== 1) return;
+
+        // Palette windows can keep AE's main window from handing focus to a
+        // new modal on macOS — the dialog opens behind and looks like a
+        // freeze. Close the progress palette before .show() and recreate it
+        // after the dialog closes so the Confirm Shots dialog always comes
+        // to front.
+        progress.update("Waiting for Confirm Shots dialog\u2026", "If nothing visible, check behind AE's main window.", 14);
+        progress.close();
+        var confResult = confDlg.show();
+        progress = makeProgressPanel();
+        progress.update("Confirm Shots dialog closed, preparing build\u2026", "", 15);
+        if (confResult !== 1) { progress.close(); return; }
 
         var aepFolder = proj.file.parent;
         var fsShots = new Folder(aepFolder.fsName + "/" + etShotsFolder.text);
         if (!fsShots.exists) fsShots.create();
-        if (!fsShots.exists) { alert("Could not create shots folder:\n" + fsShots.fsName); return; }
+        if (!fsShots.exists) { alert("Could not create shots folder:\n" + fsShots.fsName); progress.close(); return; }
         var fsScripts = fsShots;
 
         // Scaffold the Roundtrip/ and _grades/ README.txt files so the
@@ -1530,11 +1709,17 @@ NOTES
             }
 
             for (var i = 0; i < expandedLayers.length; i++) {
+                if (cancelCheck()) return;
                 var item      = expandedLayers[i];
                 var layer     = item.layer;
                 var isPrecomp = item.isPrecomp;
                 var currentNum = startNum + (i * increment);
                 var shotName   = shotPrefix + pad(currentNum, 3);
+                progress.update(
+                    "Building shot comps\u2026",
+                    "shot " + (i + 1) + " of " + expandedLayers.length + ": " + shotName,
+                    15 + 45 * (i / Math.max(1, expandedLayers.length))
+                );
                 var osSuffix   = (item.overscan && overscanPercent > 0) ? "_OS" : "";
 
                 // ── Resolve source, range, and footage location ────────────────
@@ -1840,10 +2025,19 @@ NOTES
                 });
             }
 
-        } catch(e) { reportError("PREP", e); return; } finally { app.endUndoGroup(); }
+        } catch(e) { reportError("PREP", e); try { progress.close(); } catch(eCP){} return; } finally { app.endUndoGroup(); }
 
+        if (cancelCheck()) return;
         if (!chkSkipRender.value) {
+            // Close the palette for the duration of the render: AE blocks the
+            // script during renderQueue.render() so palette updates freeze
+            // anyway, and AE's own render window takes over the UI — use its
+            // cancel button if you need to stop the render mid-flight.
+            progress.update("Saving project and handing off to AE's render queue\u2026", "AE's render window will take over now.", 60);
+            progress.close();
             try { proj.save(); proj.renderQueue.render(); } catch(e) { reportError("RENDER", e, "Check OM Template and Disk Space."); return; }
+            progress = makeProgressPanel();
+            progress.update("Render finished, importing plates\u2026", "", 65);
         }
 
         app.beginUndoGroup("Roundtrip Finish");
@@ -1852,6 +2046,10 @@ NOTES
             var importedShots = [];
             var missingPlates = [];
             for(var k=0; k<renderItems.length; k++) {
+                if (cancelCheck()) return;
+                progress.update(null,
+                    "importing plate " + (k + 1) + " of " + renderItems.length + ": " + renderItems[k].n,
+                    65 + 15 * (k / Math.max(1, renderItems.length)));
                 var ri = renderItems[k];
                 var readyToImport = false;
                 if (chkSkipRender.value) {
@@ -1902,14 +2100,19 @@ NOTES
             var dynBuildFails  = [];
             var dynBuildSkips  = []; // verbose diagnostics for non-processed entries
             if (chkCreateDynLink.value && selLayers && selLayers.length > 0) {
+                progress.update("Building Dynamic Link wrappers\u2026", "0 of " + selLayers.length, 80);
                 var binDynLink = getShotBin(getBinFolder("Shots"), "dynamicLink");
                 var handleSec  = handleFrames / mainComp.frameRate;
 
                 for (var dli = 0; dli < selLayers.length; dli++) {
+                    if (cancelCheck()) return;
                     // ── readable label for diagnostics (try/catch because the
                     //    layer DOM may be invalidated by prior processing) ──
                     var dlTag = "selLayers[" + dli + "]";
                     try { if (selLayers[dli] && selLayers[dli].layer) dlTag = selLayers[dli].layer.name; } catch(eTag) {}
+                    progress.update(null,
+                        (dli + 1) + " of " + selLayers.length + ": " + dlTag,
+                        80 + 15 * (dli / Math.max(1, selLayers.length)));
 
                     var dlLayer = selLayers[dli].layer;
                     if (!dlLayer) {
@@ -2103,9 +2306,11 @@ NOTES
             var spacerR = btnGrpR.add("statictext", undefined, ""); spacerR.alignment = ["fill", "center"];
             var btnClose = btnGrpR.add("button", undefined, "Close"); btnClose.preferredSize = [80, 28];
             btnClose.onClick = function() { rpt.close(); };
+            progress.update("Done.", "", 100);
+            progress.close();
             rpt.show();
 
-        } catch(e) { reportError("FINISH", e); } finally { app.endUndoGroup(); }
+        } catch(e) { reportError("FINISH", e); try { progress.close(); } catch(eCF){} } finally { app.endUndoGroup(); }
     }
     vfxRoundtripEpsilon();
 }

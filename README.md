@@ -319,10 +319,17 @@ loop on the edit side:
 
 ### Installation
 
-The compiled extension ships as `premiere-trim-handles-close-gaps/com.gegenschuss.trimandclose_premierepro.ccx`.
-Double-click the `.ccx` file and the Creative Cloud desktop app will install
-the extension into Premiere. After the next Premiere restart the panel
-appears under `Window > Extensions > Trim Handles & Close Gaps`.
+The compiled extension ships as `premiere-trim-handles-close-gaps/com.gegenschuss.roundtripcompanion_premierepro.ccx`.
+
+Install with a free **ZXP Installer** — grab the installer from the web
+(aescripts / Anastasiy's ZXP Installer both work), open it, then drag
+the `.ccx` file onto the installer window. Restart Premiere and the
+panel appears under `Window > Extensions > Trim Handles & Close Gaps`.
+
+Double-clicking the `.ccx` to hand it off to the Creative Cloud desktop
+app is meant to work too, but Creative Cloud sometimes silently refuses
+unsigned/third-party extensions — the ZXP Installer route is the
+reliable fallback when that happens.
 
 The handle count in the panel defaults to `50` — set it to whatever you
 used in the AE Shot Roundtrip run so the trim removes the correct amount.
@@ -339,8 +346,7 @@ syntheyes-import-aep-to-ae/          # SynthEyes AEP import/wire-up
 import-renders/                      # VFX render re-import
 create-dynamiclink-comps/            # Standalone Dynamic Link builder
 little-toolbox/                      # Little Toolbox launcher panel
-precompose-trimmed/                  # Little Toolbox: precompose with trim
-helpers/                             # Little Toolbox scripts: mute audio, guide preview, reverse-stretch → remap, copy comp markers, extend precomp handles
+helpers/                             # Little Toolbox scripts: mute audio, guide preview, reverse-stretch → remap, precompose trimmed, copy comp markers, extend precomp handles
 premiere-trim-handles-close-gaps/    # Premiere Pro companion extension
 ```
 

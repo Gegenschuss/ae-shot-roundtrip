@@ -51,7 +51,7 @@
         {
             label:  "Precompose Trimmed",
             tip:    "Precompose selected layers (move all attributes, full-length comp), then trim the new precomp layer to the original in/out.",
-            file:   "../precompose-trimmed/precompose_trimmed.jsx"
+            file:   "../helpers/precompose_trimmed.jsx"
         },
         {
             label:  "Reverse Stretch \u2192 Remap",
