@@ -20,13 +20,14 @@ All tools are accessible from a single dockable ScriptUI launcher panel.
 
 <img src="docs/panel.png" width="220" alt="Gegenschuss AE Shot Roundtrip panel">
 
-> [!WARNING]
-> **Save a copy of your `.aep` before running Shot Roundtrip.** The
-> tool saves the project mid-run (the render queue needs a saved project
-> to start), which makes Cmd/Ctrl+Z unreliable as a rollback — once the
-> save fires, the only clean way back is the copy you made beforehand.
-> Duplicate the project file on disk, or use `File > Save As…` to a
-> `_before_roundtrip` filename, then run the roundtrip on the working copy.
+> [!NOTE]
+> **Shot Roundtrip version-bumps your `.aep` automatically before
+> touching anything.** `MyProject_v03.aep` → `MyProject_v04.aep` (or
+> `MyProject.aep` → `MyProject_v01.aep` if the file has no `_v##`
+> suffix yet). Every modification lands in the new file; your original
+> stays on disk untouched as the rollback point. If the Save As fails
+> (disk full, permissions, etc.) the roundtrip aborts before any
+> changes, so you can't lose work either way.
 
 > [!NOTE]
 > **Run this early in your AE production — before you pile on expressions,
@@ -366,14 +367,13 @@ premiere-trim-handles-close-gaps/    # Premiere Pro companion extension
 ## FAQ
 
 **Is it going to mess up my project?**
-**Make a copy of your `.aep` first.** The roundtrip saves the project
-mid-run (the render queue needs a saved project to start), so
-Cmd/Ctrl+Z isn't a reliable rollback — by the time you'd want to undo,
-the changes are already on disk. With a pre-run copy in hand, you can
-just reopen the copy and try again. On disk, the only writes the
-roundtrip itself makes outside the `.aep` go into your chosen
-`Roundtrip/` folder (plate renders + a few auto-generated `README.txt`
-scaffolds). Nothing else is touched.
+Shot Roundtrip version-bumps your `.aep` automatically on launch
+(`_v03.aep` → `_v04.aep`, etc.) and runs the whole pipeline in the
+new file. Your original stays on disk as the rollback point, so if
+anything goes wrong you just reopen the older version. On disk, the
+only writes the roundtrip makes outside the `.aep` go into your
+chosen `Roundtrip/` folder (plate renders + a few auto-generated
+`README.txt` scaffolds). Nothing else is touched.
 
 **Do I have to use Premiere?**
 No. The AE side works standalone. The Premiere extension only

@@ -162,7 +162,7 @@ NOTES
             return g;
         };
 
-        var dlg = new Window("dialog", "Gegenschuss VFX Roundtrip");
+        var dlg = new Window("dialog", "Shot Roundtrip");
         dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
         dlg.spacing = 10; dlg.margins = 14;
 
@@ -309,6 +309,56 @@ NOTES
             return true;
         }
         function pad(n, s) { var str = "" + n; while (str.length < s) str = "0" + str; return str; }
+
+        // Save As → next _v## version before the roundtrip touches anything.
+        // VFX convention: MyProject_v03.aep → MyProject_v04.aep. If the current
+        // filename has no _v## suffix, tack on _v01. If the target already
+        // exists on disk, bump further until we find an unused number. The
+        // ORIGINAL file stays on disk untouched as the rollback point; the
+        // AE session continues in the new file. Returns the new File on
+        // success, or null on failure (caller aborts).
+        function saveAsNextVersion() {
+            var cur = proj.file;
+            if (!cur) return null; // guarded at top of function, defensive
+            var baseName = cur.name.replace(/\.aep$/i, "");
+            // Underscore before `v` is optional, so both `project_v06` and a
+            // bare `v06.aep` are recognised as versioned and bumped in place.
+            var m = baseName.match(/^(.*?)(_?v)(\d+)$/);
+            var stem, prefix, width, next;
+            if (m) {
+                stem   = m[1];
+                prefix = m[2];
+                width  = m[3].length;
+                next   = parseInt(m[3], 10) + 1;
+            } else {
+                stem   = baseName;
+                prefix = "_v";
+                width  = 2;
+                next   = 1;
+            }
+            var newFile = null;
+            while (next < 10000) {
+                var candidate = new File(cur.parent.fsName + "/" + stem + prefix + pad(next, width) + ".aep");
+                if (!candidate.exists) { newFile = candidate; break; }
+                next++;
+            }
+            if (!newFile) {
+                alert("Shot Roundtrip: could not find an unused version number for the backup copy.\nAborting so nothing is modified.");
+                return null;
+            }
+            try {
+                // Flush any unsaved edits to the current file first, then
+                // Save As to the new version. After proj.save(newFile) the
+                // session's current file becomes newFile.
+                proj.save();
+                proj.save(newFile);
+            } catch (eSave) {
+                alert("Shot Roundtrip: failed to save versioned copy —\n" + eSave.message +
+                      "\n\nAborting so the original file stays untouched.");
+                return null;
+            }
+            return newFile;
+        }
         function getBinFolder(name) { for (var i=1;i<=proj.numItems;i++) { if(proj.item(i).name==name && proj.item(i) instanceof FolderItem) return proj.item(i); } return proj.items.addFolder(name); }
         // "cut in"/"cut out" markers created here use protectedRegion so a
         // later time remap or stretch on the layer keeps the marker locked
@@ -776,7 +826,19 @@ NOTES
 
         selLayers.sort(function(a, b) { return a.layer.index - b.layer.index; });
 
+        // Save As to the next _v## version BEFORE any DOM mutation. Every
+        // change the roundtrip makes lands in the new file; the original
+        // sits on disk as the rollback point. Abort on failure so the user
+        // never ends up with modifications on the original file.
+        var versionedFile = saveAsNextVersion();
+        if (!versionedFile) return;
+
         progress = makeProgressPanel();
+        progress.update(
+            "Working in new version: " + versionedFile.name,
+            "Original is preserved on disk as the backup.",
+            1
+        );
         progress.update("Preflight: scanning " + selLayers.length + " selected layer(s)\u2026", "", 2);
 
         // ── Preflight: time remap or time stretch ─────────────────────────────
@@ -904,54 +966,59 @@ NOTES
                 var tr = layer.property("ADBE Time Remapping");
                 tr.selected = true;
 
-                // Two keys placed at the handle boundaries (not the cut
-                // boundaries) so AE never has to extrapolate past the last key
-                // in the *_dynamicLink wrapper or anywhere else the layer gets
-                // extended beyond the cut. Earlier attempts placed keys at the
-                // cut boundaries and relied on LINEAR extrapolation; that broke
-                // once moveLayerAttribs copied the keys into containerInner at
-                // a comp-time that didn't line up with the layer's visible
-                // range, and the handles froze on a single source frame.
+                // Four keys all on the same line (the actual playback curve).
+                // Cut-boundary keys pin the cut range at the intended speed;
+                // the outer two extend into the handle range so AE doesn't
+                // extrapolate past the last key in *_dynamicLink wrappers or
+                // anywhere else the layer gets extended.
                 //
-                // Slope comes from the stretch-derived source times at compStart
-                // and endKeyTime, so it captures the actual speed regardless of
-                // the original negative-stretch magnitude (-100 → slope -1,
-                // -50 → -2, -200 → -0.5, -124 → ≈ -0.806, etc.). Values clamp
-                // to [0, srcDur] — when the source runs out, clamping freezes
-                // on the source edge, the physically correct behaviour.
+                // endKeyTime sits AT compEnd (on the cut_out marker) rather
+                // than one frame earlier. The LAST rendered frame is still at
+                // compEnd - frameDur (outPoint exclusive), and the LINEAR
+                // interpolation between (compStart, srcAtStart) and
+                // (compEnd, endKeyVal) hits srcAtEnd exactly at that frame —
+                // we just extrapolate endKeyVal along the slope so the key
+                // sits on the marker without changing playback.
                 //
-                // Trade-off of keeping only 2 keys: when clamping kicks in
-                // (cut sits within handleSec of a source edge, in the direction
-                // the handle extends into the source), the single linear segment
-                // between the clamped boundary key and the unclamped one
-                // slightly warps the cut-range playback too. In that rare edge
-                // case, the cut plays at a slightly shifted speed. Adding back
-                // interior keys at compStart/endKeyTime would pin the cut range
-                // exactly; left out here for timeline cleanliness.
-                var endKeyTime = compEnd - frameDur;
-                var keySpan    = endKeyTime - compStart;
+                // Slope = (srcAtEnd - srcAtStart) / (cutDur - frameDur) —
+                // the actual stretch rate, since srcAtStart/srcAtEnd sample
+                // the comp time span of (cutDur - frameDur) (compStart to
+                // last rendered frame at compEnd - frameDur). This captures
+                // any negative-stretch magnitude (-100 → slope -1,
+                // -50 → -2, -200 → -0.5, -124 → ≈ -0.806).
+                var endKeyTime = compEnd;
+                var cutDurLen  = compEnd - compStart;
                 var handleSec  = (layer.containingComp && layer.containingComp.frameRate)
                                ? (handleFrames / layer.containingComp.frameRate)
                                : 0;
-                var slope      = (keySpan > 0) ? ((srcAtEnd - srcAtStart) / keySpan) : 0;
-                var preTime    = compStart  - handleSec;
-                var postTime   = endKeyTime + handleSec;
+                var slope      = ((cutDurLen - frameDur) > 0)
+                               ? ((srcAtEnd - srcAtStart) / (cutDurLen - frameDur))
+                               : 0;
+                var preTime    = compStart - handleSec;
+                var postTime   = compEnd   + handleSec;
                 var preVal     = srcAtStart - slope * handleSec;
-                var postVal    = srcAtEnd   + slope * handleSec;
-                if (preVal  < 0)      preVal  = 0;
-                if (preVal  > srcDur) preVal  = srcDur;
-                if (postVal < 0)      postVal = 0;
-                if (postVal > srcDur) postVal = srcDur;
+                var endKeyVal  = srcAtStart + slope * cutDurLen;
+                var postVal    = srcAtStart + slope * (cutDurLen + handleSec);
+                if (preVal    < 0)      preVal    = 0;
+                if (preVal    > srcDur) preVal    = srcDur;
+                if (endKeyVal < 0)      endKeyVal = 0;
+                if (endKeyVal > srcDur) endKeyVal = srcDur;
+                if (postVal   < 0)      postVal   = 0;
+                if (postVal   > srcDur) postVal   = srcDur;
 
                 // Write our keys first, then prune AE's auto-keys — clearing
                 // them before writing can leave the property in an unusable state.
-                tr.setValueAtTime(preTime,  preVal);
-                tr.setValueAtTime(postTime, postVal);
+                tr.setValueAtTime(preTime,    preVal);
+                tr.setValueAtTime(compStart,  srcAtStart);
+                tr.setValueAtTime(endKeyTime, endKeyVal);
+                tr.setValueAtTime(postTime,   postVal);
 
                 for (var k = tr.numKeys; k >= 1; k--) {
                     var kt = tr.keyTime(k);
-                    if (Math.abs(kt - preTime)  > 0.0005 &&
-                        Math.abs(kt - postTime) > 0.0005) {
+                    if (Math.abs(kt - preTime)    > 0.0005 &&
+                        Math.abs(kt - compStart)  > 0.0005 &&
+                        Math.abs(kt - endKeyTime) > 0.0005 &&
+                        Math.abs(kt - postTime)   > 0.0005) {
                         tr.removeKey(k);
                     }
                 }
@@ -980,7 +1047,38 @@ NOTES
             }
             return n;
         }
-        // Snapshot the mainComp selection — our converter flips layer/property
+        // Scan for reversals FIRST so the warning dialog comes up BEFORE any
+        // DOM mutation. Cancel on this dialog must leave the project
+        // unmodified — earlier versions converted negative-stretch to
+        // time-remap before the dialog, so a cancel left the conversions
+        // already applied.
+        progress.update("Scanning for reversed clips\u2026", "", 3);
+        var reversedList = []; // drives the loud confirm dialog
+        for (var ri = 0; ri < selLayers.length; ri++) {
+            if (cancelCheck()) return;
+            var rTl = selLayers[ri].layer;
+            var rEffects = scanSelLayerForEffects(rTl);
+            for (var rE = 0; rE < rEffects.length; rE++) {
+                if (rEffects[rE].reversed) reversedList.push(rEffects[rE]);
+            }
+        }
+
+        // Loud dialog only when a reversal is present. Non-reversed time
+        // effects proceed silently and show up as passive info next to the
+        // shot in the Confirm Shots dialog.
+        if (reversedList.length > 0) {
+            // Close palette before modal so macOS hands focus to the dialog.
+            progress.close();
+            var revOk = confirmReversedClips(reversedList);
+            progress = makeProgressPanel();
+            if (!revOk) { progress.close(); return; } // user canceled → nothing changed yet
+            progress.update("Reversed clips confirmed, continuing\u2026", "", 4);
+        }
+
+        // Only AFTER the user confirms (or no reversals were present) do we
+        // convert negative-stretch reversals into time-remap equivalents. The
+        // dialog above is the last chance to bail out without modifications.
+        // Snapshot the mainComp selection — the converter flips layer/property
         // selection flags to dodge the "hidden property" error, which collapses
         // the user's original selection in the UI. Restore it after the loop.
         var preConvertSelection = [];
@@ -1008,8 +1106,11 @@ NOTES
             }
         } catch(eSelSnap) {}
 
-        var trAffected   = []; // top-level, fed to autoPrecomposeTrimmed
-        var reversedList = []; // drives the loud confirm dialog
+        // Build trAffected AFTER the convert so inPoint/outPoint reflect the
+        // post-conversion forward-ordered values (convertStretchReversalToRemap
+        // swaps them into comp-timeline order when re-anchoring a reversed
+        // layer). autoPrecomposeTrimmed expects forward in/out.
+        var trAffected = []; // top-level, fed to autoPrecomposeTrimmed
         for (var ti = 0; ti < selLayers.length; ti++) {
             var tl = selLayers[ti].layer;
             var topFx = describeTimeEffect(tl);
@@ -1017,23 +1118,8 @@ NOTES
                 trAffected.push({ selIdx: ti, index: tl.index, name: tl.name, inPoint: tl.inPoint, outPoint: tl.outPoint,
                     label: topFx.label, reversed: topFx.reversed });
             }
-            var layerEffects = scanSelLayerForEffects(tl);
-            for (var le = 0; le < layerEffects.length; le++) {
-                if (layerEffects[le].reversed) reversedList.push(layerEffects[le]);
-            }
         }
 
-        // Loud dialog only when a reversal is present. Non-reversed time
-        // effects proceed silently and show up as passive info next to the
-        // shot in the Confirm Shots dialog.
-        if (reversedList.length > 0) {
-            // Close palette before modal so macOS hands focus to the dialog.
-            progress.close();
-            var revOk = confirmReversedClips(reversedList);
-            progress = makeProgressPanel();
-            if (!revOk) { progress.close(); return; } // user canceled
-            progress.update("Reversed clips confirmed, continuing\u2026", "", 8);
-        }
         if (trAffected.length > 0) {
             progress.update("Auto-precomposing " + trAffected.length + " time-remapped layer(s)\u2026", "", 9);
             if (!autoPrecomposeTrimmed(mainComp, trAffected)) {

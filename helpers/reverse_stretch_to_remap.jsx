@@ -109,45 +109,59 @@ other Hold modes may shift the layer's visual extent after stretch reset.
         var tr = layer.property("ADBE Time Remapping");
         tr.selected = true;
 
-        // Two keys placed at the handle boundaries (not the cut boundaries)
-        // so AE never has to extrapolate past the last key when downstream
-        // pipelines extend the layer beyond the cut (e.g. the roundtrip's
-        // _dynamicLink wrapper). Slope comes from the stretch-derived source
-        // times, so this works for any constant negative stretch magnitude
-        // (-100 → slope -1, -50 → -2, -200 → -0.5, -124 → ≈ -0.806). Values
-        // clamp to [0, srcDur]; when the source runs out, clamping freezes on
-        // the source edge, the physically correct behaviour.
+        // Four keys all on the same line (the actual playback curve).
+        // Cut-boundary keys pin the cut range at the intended speed; the
+        // outer two extend into the handle range so AE doesn't extrapolate
+        // past the last key when downstream pipelines extend the layer.
         //
-        // AE's outPoint is exclusive (the first NON-rendered frame), so the
-        // inner end reference lands one frame before compEnd.
-        var endKeyTime = compEnd - frameDur;
-        var keySpan    = endKeyTime - compStart;
+        // endKeyTime sits AT compEnd (on the cut_out marker) rather than
+        // one frame earlier. The LAST rendered frame is still at
+        // compEnd - frameDur (outPoint exclusive), and LINEAR interpolation
+        // between (compStart, srcAtStart) and (compEnd, endKeyVal) hits
+        // srcAtEnd exactly at that frame — endKeyVal is extrapolated along
+        // the slope so the key sits on the marker without changing playback.
+        //
+        // Slope = (srcAtEnd - srcAtStart) / (cutDur - frameDur) — the actual
+        // stretch rate, since srcAtStart/srcAtEnd sample the comp-time span
+        // of (cutDur - frameDur). Values clamp to [0, srcDur]; source-edge
+        // freeze on clamp is physically correct.
+        var endKeyTime = compEnd;
+        var cutDurLen  = compEnd - compStart;
         var handleSec  = handleFrames / layer.containingComp.frameRate;
-        var slope      = (keySpan > 0) ? ((srcAtEnd - srcAtStart) / keySpan) : 0;
-        var preTime    = compStart  - handleSec;
-        var postTime   = endKeyTime + handleSec;
+        var slope      = ((cutDurLen - frameDur) > 0)
+                       ? ((srcAtEnd - srcAtStart) / (cutDurLen - frameDur))
+                       : 0;
+        var preTime    = compStart - handleSec;
+        var postTime   = compEnd   + handleSec;
         var preVal     = srcAtStart - slope * handleSec;
-        var postVal    = srcAtEnd   + slope * handleSec;
-        if (preVal  < 0)      preVal  = 0;
-        if (preVal  > srcDur) preVal  = srcDur;
-        if (postVal < 0)      postVal = 0;
-        if (postVal > srcDur) postVal = srcDur;
+        var endKeyVal  = srcAtStart + slope * cutDurLen;
+        var postVal    = srcAtStart + slope * (cutDurLen + handleSec);
+        if (preVal    < 0)      preVal    = 0;
+        if (preVal    > srcDur) preVal    = srcDur;
+        if (endKeyVal < 0)      endKeyVal = 0;
+        if (endKeyVal > srcDur) endKeyVal = srcDur;
+        if (postVal   < 0)      postVal   = 0;
+        if (postVal   > srcDur) postVal   = srcDur;
 
         // Write our keys FIRST. Removing all auto-keys before writing can
         // leave the property in an unusable state, so add ours, then drop
         // any stray auto-keys.
-        tr.setValueAtTime(preTime,  preVal);
-        tr.setValueAtTime(postTime, postVal);
+        tr.setValueAtTime(preTime,    preVal);
+        tr.setValueAtTime(compStart,  srcAtStart);
+        tr.setValueAtTime(endKeyTime, endKeyVal);
+        tr.setValueAtTime(postTime,   postVal);
 
         for (var k = tr.numKeys; k >= 1; k--) {
             var kt = tr.keyTime(k);
-            if (Math.abs(kt - preTime)  > 0.0005 &&
-                Math.abs(kt - postTime) > 0.0005) {
+            if (Math.abs(kt - preTime)    > 0.0005 &&
+                Math.abs(kt - compStart)  > 0.0005 &&
+                Math.abs(kt - endKeyTime) > 0.0005 &&
+                Math.abs(kt - postTime)   > 0.0005) {
                 tr.removeKey(k);
             }
         }
 
-        // Force LINEAR interpolation on both keys. AE's default for a fresh
+        // Force LINEAR interpolation on every key. AE's default for a fresh
         // setValueAtTime on time remap is BEZIER, which eases between keys —
         // wrong for constant-speed reversed playback.
         for (var ki = 1; ki <= tr.numKeys; ki++) {
@@ -157,8 +171,8 @@ other Hold modes may shift the layer's visual extent after stretch reset.
         }
 
         return "remapped: pre[" + preTime.toFixed(3) + "=" + preVal.toFixed(3) + "] " +
-               "post[" + postTime.toFixed(3) + "=" + postVal.toFixed(3) + "] " +
-               "cut src[" + srcAtStart.toFixed(3) + "\u2192" + srcAtEnd.toFixed(3) + "]";
+               "cut src[" + srcAtStart.toFixed(3) + "\u2192" + srcAtEnd.toFixed(3) + "] " +
+               "post[" + postTime.toFixed(3) + "=" + postVal.toFixed(3) + "]";
     }
 
     app.beginUndoGroup("Reverse Stretch \u2192 Remap");

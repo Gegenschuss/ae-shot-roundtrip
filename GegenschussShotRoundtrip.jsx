@@ -91,7 +91,7 @@
     function buildUI(thisObj) {
         var win = (thisObj instanceof Panel)
             ? thisObj
-            : new Window("palette", "AE Shot Roundtrip", undefined, { resizeable: true });
+            : new Window("palette", "Shot Roundtrip", undefined, { resizeable: true });
 
         win.orientation  = "column";
         win.alignChildren = ["fill", "top"];
