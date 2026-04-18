@@ -1,0 +1,28 @@
+{
+  "manifestVersion": 5,
+  "id": "com.gegenschuss.trimandclose",
+  "name": "Gegenschuss",
+  "version": "1.0.0",
+  "main": "main.js",
+  "host": [
+    {
+      "app": "premierepro",
+      "minVersion": "25.4",
+      "data": {
+        "apiVersion": 2,
+        "loadEvent": "startup"
+      }
+    }
+  ],
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "panel1",
+      "label": { "default": "Trim Handles & Close Gaps" },
+      "minimumSize":          { "width": 220, "height": 160 },
+      "maximumSize":          { "width": 800, "height": 600 },
+      "preferredDockedSize":  { "width": 260, "height": 200 },
+      "main": "main.js"
+    }
+  ]
+}

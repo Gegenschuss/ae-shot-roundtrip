@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Local state
+notes.txt
+
+# Adobe After Effects
+*.aep~
+Adobe After Effects Auto-Save/
+*.aepx.bak
+
+# Claude Code local state
+.claude/
