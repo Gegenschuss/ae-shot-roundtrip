@@ -18,7 +18,15 @@ reconstruction.
 
 All tools are accessible from a single dockable ScriptUI launcher panel.
 
-<img src="docs/panel.png" width="360" alt="Gegenschuss AE Shot Roundtrip panel">
+<img src="docs/panel.png" width="220" alt="Gegenschuss AE Shot Roundtrip panel">
+
+> [!WARNING]
+> **Save a copy of your `.aep` before running Shot Roundtrip.** The
+> tool saves the project mid-run (the render queue needs a saved project
+> to start), which makes Cmd/Ctrl+Z unreliable as a rollback — once the
+> save fires, the only clean way back is the copy you made beforehand.
+> Duplicate the project file on disk, or use `File > Save As…` to a
+> `_before_roundtrip` filename, then run the roundtrip on the working copy.
 
 ## Why this exists
 
@@ -120,14 +128,6 @@ work is underway. The pipeline is designed around this:
 ## Tools
 
 ### Roundtrip
-
-> [!WARNING]
-> **Save a copy of your `.aep` before running Shot Roundtrip.** The
-> tool saves the project mid-run (the render queue needs a saved project
-> to start), which makes Cmd/Ctrl+Z unreliable as a rollback — once the
-> save fires, the only clean way back is the copy you made beforehand.
-> Duplicate the project file on disk, or use `File > Save As…` to a
-> `_before_roundtrip` filename, then run the roundtrip on the working copy.
 
 > [!WARNING]
 > **Rules the entire workflow relies on — do not break these:**
