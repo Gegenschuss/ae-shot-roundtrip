@@ -71,6 +71,20 @@
         return name;
     }
 
+    // Snapshot non-target selection by index. precompose() collapses
+    // comp.selectedLayers to just the most-recently-created precomp layer,
+    // so anything the user had selected that wasn't a target would silently
+    // drop out. After the loop we re-select those originals plus every new
+    // precomp layer we just created. Matches the roundtrip's autoPrecomposeTrimmed.
+    var targetIndices = {};
+    for (var ti = 0; ti < layerInfos.length; ti++) targetIndices[layerInfos[ti].index] = true;
+    var preservedSelection = [];
+    for (var pi = 1; pi <= comp.numLayers; pi++) {
+        var pl = comp.layer(pi);
+        if (pl.selected && !targetIndices[pi]) preservedSelection.push(pl);
+    }
+    var newPrecompLayers = [];
+
     // ── loop ───────────────────────────────────────────────────────────────────
 
     app.beginUndoGroup("Precompose Trimmed");
@@ -103,7 +117,19 @@
 
             precompLayer.inPoint  = info.inPoint;
             precompLayer.outPoint = info.outPoint;
+            newPrecompLayers.push(precompLayer);
         }
+
+        // Restore the combined selection: preserved originals + every new precomp.
+        try {
+            for (var dsel = 1; dsel <= comp.numLayers; dsel++) comp.layer(dsel).selected = false;
+            for (var psi = 0; psi < preservedSelection.length; psi++) {
+                try { preservedSelection[psi].selected = true; } catch(ePs) {}
+            }
+            for (var npi = 0; npi < newPrecompLayers.length; npi++) {
+                try { newPrecompLayers[npi].selected = true; } catch(eNp) {}
+            }
+        } catch(eSelPC) {}
 
     } finally {
         app.endUndoGroup();

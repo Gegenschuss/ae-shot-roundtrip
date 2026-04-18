@@ -304,6 +304,21 @@ NOTES
         // descending index order, move all attributes, full comp duration, trim to original in/out.
         // Returns true on success, false on failure.
         function autoPrecomposeTrimmed(comp, layerInfos) {
+            // Snapshot non-affected selection by layer name+index pair. precompose()
+            // collapses comp.selectedLayers to just the most-recently-created
+            // precomp layer, so anything the user had selected that wasn't in
+            // layerInfos would silently drop out — visible as a missing selection
+            // in the later Confirm Shots list. After the loop we re-select those
+            // originals plus every new precomp layer we just created.
+            var trIndices = {};
+            for (var ii = 0; ii < layerInfos.length; ii++) trIndices[layerInfos[ii].index] = true;
+            var preservedSelection = [];
+            for (var pi = 1; pi <= comp.numLayers; pi++) {
+                var pl = comp.layer(pi);
+                if (pl.selected && !trIndices[pi]) preservedSelection.push(pl);
+            }
+            var newPrecompLayers = [];
+
             layerInfos.sort(function(a, b) { return b.index - a.index; });
             app.beginUndoGroup("Auto-Precompose for Roundtrip");
             try {
@@ -330,6 +345,7 @@ NOTES
                     if (aPrecompLayer) {
                         aPrecompLayer.inPoint  = aInfo.inPoint;
                         aPrecompLayer.outPoint = aInfo.outPoint;
+                        newPrecompLayers.push(aPrecompLayer);
                     }
                 }
             } catch(eAP) {
@@ -337,6 +353,18 @@ NOTES
                 app.endUndoGroup();
                 return false;
             }
+
+            // Restore the combined selection: preserved originals + every new precomp.
+            try {
+                for (var dsel = 1; dsel <= comp.numLayers; dsel++) comp.layer(dsel).selected = false;
+                for (var psi = 0; psi < preservedSelection.length; psi++) {
+                    try { preservedSelection[psi].selected = true; } catch(ePs) {}
+                }
+                for (var npi = 0; npi < newPrecompLayers.length; npi++) {
+                    try { newPrecompLayers[npi].selected = true; } catch(eNp) {}
+                }
+            } catch(eSelPC) {}
+
             app.endUndoGroup();
             return true;
         }
@@ -666,23 +694,13 @@ NOTES
         }
 
         // Maps a time in the containing comp to a time in the layer's source,
-        // respecting time remap when enabled and stretch otherwise. For time-remapped
-        // layers, clamp compTime outside the key span to the first/last key value so
-        // handle-offset math doesn't extrapolate past the reversed-remap's valid
-        // source window (AE's default behaviour past the last key on time remap is
-        // to hold, which would freeze handle frames).
+        // respecting time remap when enabled and stretch otherwise. Relies on the
+        // keys having LINEAR interpolation so valueAtTime extrapolates past the
+        // first/last key (which is what the handle-extended layer actually plays);
+        // convertStretchReversalToRemap forces that interpolation type explicitly.
         function mapTimeToSource(layer, compTime) {
             if (layer.timeRemapEnabled) {
-                try {
-                    var tr = layer.property("ADBE Time Remapping");
-                    if (tr.numKeys >= 2) {
-                        var firstT = tr.keyTime(1);
-                        var lastT  = tr.keyTime(tr.numKeys);
-                        if (compTime <= firstT) return tr.keyValue(1);
-                        if (compTime >= lastT)  return tr.keyValue(tr.numKeys);
-                    }
-                    return tr.valueAtTime(compTime, false);
-                } catch(e) {}
+                try { return layer.property("ADBE Time Remapping").valueAtTime(compTime, false); } catch(e) {}
             }
             var stretch = (layer.stretch !== 0) ? layer.stretch : 100;
             return (compTime - layer.startTime) * (100 / stretch);
@@ -1086,21 +1104,67 @@ NOTES
                 var tr = layer.property("ADBE Time Remapping");
                 tr.selected = true;
 
-                // End key lands one frame before compEnd because outPoint is
-                // exclusive (first non-rendered frame). Write our keys first, then
-                // prune AE's auto-keys — clearing them before writing can leave the
-                // property in an unusable state.
+                // Two keys placed at the handle boundaries (not the cut
+                // boundaries) so AE never has to extrapolate past the last key
+                // in the *_dynamicLink wrapper or anywhere else the layer gets
+                // extended beyond the cut. Earlier attempts placed keys at the
+                // cut boundaries and relied on LINEAR extrapolation; that broke
+                // once moveLayerAttribs copied the keys into containerInner at
+                // a comp-time that didn't line up with the layer's visible
+                // range, and the handles froze on a single source frame.
+                //
+                // Slope comes from the stretch-derived source times at compStart
+                // and endKeyTime, so it captures the actual speed regardless of
+                // the original negative-stretch magnitude (-100 → slope -1,
+                // -50 → -2, -200 → -0.5, -124 → ≈ -0.806, etc.). Values clamp
+                // to [0, srcDur] — when the source runs out, clamping freezes
+                // on the source edge, the physically correct behaviour.
+                //
+                // Trade-off of keeping only 2 keys: when clamping kicks in
+                // (cut sits within handleSec of a source edge, in the direction
+                // the handle extends into the source), the single linear segment
+                // between the clamped boundary key and the unclamped one
+                // slightly warps the cut-range playback too. In that rare edge
+                // case, the cut plays at a slightly shifted speed. Adding back
+                // interior keys at compStart/endKeyTime would pin the cut range
+                // exactly; left out here for timeline cleanliness.
                 var endKeyTime = compEnd - frameDur;
-                tr.setValueAtTime(compStart,  srcAtStart);
-                tr.setValueAtTime(endKeyTime, srcAtEnd);
+                var keySpan    = endKeyTime - compStart;
+                var handleSec  = (layer.containingComp && layer.containingComp.frameRate)
+                               ? (handleFrames / layer.containingComp.frameRate)
+                               : 0;
+                var slope      = (keySpan > 0) ? ((srcAtEnd - srcAtStart) / keySpan) : 0;
+                var preTime    = compStart  - handleSec;
+                var postTime   = endKeyTime + handleSec;
+                var preVal     = srcAtStart - slope * handleSec;
+                var postVal    = srcAtEnd   + slope * handleSec;
+                if (preVal  < 0)      preVal  = 0;
+                if (preVal  > srcDur) preVal  = srcDur;
+                if (postVal < 0)      postVal = 0;
+                if (postVal > srcDur) postVal = srcDur;
+
+                // Write our keys first, then prune AE's auto-keys — clearing
+                // them before writing can leave the property in an unusable state.
+                tr.setValueAtTime(preTime,  preVal);
+                tr.setValueAtTime(postTime, postVal);
 
                 for (var k = tr.numKeys; k >= 1; k--) {
                     var kt = tr.keyTime(k);
-                    if (Math.abs(kt - compStart)  > 0.0005 &&
-                        Math.abs(kt - endKeyTime) > 0.0005) {
+                    if (Math.abs(kt - preTime)  > 0.0005 &&
+                        Math.abs(kt - postTime) > 0.0005) {
                         tr.removeKey(k);
                     }
                 }
+
+                // Force LINEAR interpolation on both keys. AE's default for a
+                // fresh setValueAtTime on time remap is BEZIER, which eases
+                // between keys — wrong for constant-speed reversed playback.
+                for (var ki = 1; ki <= tr.numKeys; ki++) {
+                    try {
+                        tr.setInterpolationTypeAtKey(ki, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.LINEAR);
+                    } catch (eInterp) {}
+                }
+
                 return true;
             } catch (e) { return false; }
         }

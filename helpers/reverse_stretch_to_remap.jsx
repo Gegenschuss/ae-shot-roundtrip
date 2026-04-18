@@ -17,16 +17,15 @@ time-remap equivalent:
 
   - Set stretch back to 100
   - Enable time remap
-  - Replace AE's auto-created keyframes with a pair that reproduces the
-    layer's current reversed playback:
-       at layer.inPoint   → source time that was visible there pre-conversion
-       at layer.outPoint  → source time that was visible there pre-conversion
-    (swapped relative to the post-stretch-reset forward default, so playback
-    stays reversed)
+  - Replace AE's auto-created keyframes with a pair placed at the HANDLE
+    boundaries (compStart − handleSec, endKeyTime + handleSec). Values are
+    linearly extrapolated from the stretch-derived slope so playback stays
+    reversed across the full handle range, clamped to [0, srcDur] so we
+    never ask for source frames that don't exist.
 
-Identical logic to Shot Roundtrip's auto-conversion — exposed as a standalone
-helper so you can run it on one layer at a time and verify the result before
-running a full roundtrip.
+Identical logic to Shot Roundtrip's auto-conversion (including the handle
+prompt) — exposed as a standalone helper so you can run it on one layer at
+a time and verify the result before running a full roundtrip.
 
 Idempotent on already-remap-reversed layers (they get skipped). Negative
 stretch with AE's default "Hold in Place: Layer In-point" is what's assumed;
@@ -49,6 +48,9 @@ other Hold modes may shift the layer's visual extent after stretch reset.
         alert("Reverse Stretch \u2192 Remap: select at least one layer.");
         return;
     }
+
+    var handleFrames = promptHandleFrames(50);
+    if (handleFrames === null) return; // user cancelled
 
     function convertOne(layer) {
         if (!(layer instanceof AVLayer)) return "skipped (not an AV layer)";
@@ -107,27 +109,56 @@ other Hold modes may shift the layer's visual extent after stretch reset.
         var tr = layer.property("ADBE Time Remapping");
         tr.selected = true;
 
+        // Two keys placed at the handle boundaries (not the cut boundaries)
+        // so AE never has to extrapolate past the last key when downstream
+        // pipelines extend the layer beyond the cut (e.g. the roundtrip's
+        // _dynamicLink wrapper). Slope comes from the stretch-derived source
+        // times, so this works for any constant negative stretch magnitude
+        // (-100 → slope -1, -50 → -2, -200 → -0.5, -124 → ≈ -0.806). Values
+        // clamp to [0, srcDur]; when the source runs out, clamping freezes on
+        // the source edge, the physically correct behaviour.
+        //
         // AE's outPoint is exclusive (the first NON-rendered frame), so the
-        // end key has to land one frame before compEnd to line up with the
-        // last actually-rendered frame.
+        // inner end reference lands one frame before compEnd.
         var endKeyTime = compEnd - frameDur;
+        var keySpan    = endKeyTime - compStart;
+        var handleSec  = handleFrames / layer.containingComp.frameRate;
+        var slope      = (keySpan > 0) ? ((srcAtEnd - srcAtStart) / keySpan) : 0;
+        var preTime    = compStart  - handleSec;
+        var postTime   = endKeyTime + handleSec;
+        var preVal     = srcAtStart - slope * handleSec;
+        var postVal    = srcAtEnd   + slope * handleSec;
+        if (preVal  < 0)      preVal  = 0;
+        if (preVal  > srcDur) preVal  = srcDur;
+        if (postVal < 0)      postVal = 0;
+        if (postVal > srcDur) postVal = srcDur;
 
-        // Write our two keys FIRST (reversed playback: srcAtStart > srcAtEnd).
-        // Removing all auto-keys before writing can leave the property in an
-        // unusable state, so add ours, then drop any stray auto-keys.
-        tr.setValueAtTime(compStart,  srcAtStart);
-        tr.setValueAtTime(endKeyTime, srcAtEnd);
+        // Write our keys FIRST. Removing all auto-keys before writing can
+        // leave the property in an unusable state, so add ours, then drop
+        // any stray auto-keys.
+        tr.setValueAtTime(preTime,  preVal);
+        tr.setValueAtTime(postTime, postVal);
 
         for (var k = tr.numKeys; k >= 1; k--) {
             var kt = tr.keyTime(k);
-            if (Math.abs(kt - compStart)  > 0.0005 &&
-                Math.abs(kt - endKeyTime) > 0.0005) {
+            if (Math.abs(kt - preTime)  > 0.0005 &&
+                Math.abs(kt - postTime) > 0.0005) {
                 tr.removeKey(k);
             }
         }
 
-        return "remapped: comp[" + compStart.toFixed(3) + "\u2192" + endKeyTime.toFixed(3) + "] " +
-               "src["  + srcAtStart.toFixed(3) + "\u2192" + srcAtEnd.toFixed(3) + "]";
+        // Force LINEAR interpolation on both keys. AE's default for a fresh
+        // setValueAtTime on time remap is BEZIER, which eases between keys —
+        // wrong for constant-speed reversed playback.
+        for (var ki = 1; ki <= tr.numKeys; ki++) {
+            try {
+                tr.setInterpolationTypeAtKey(ki, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.LINEAR);
+            } catch (eInterp) {}
+        }
+
+        return "remapped: pre[" + preTime.toFixed(3) + "=" + preVal.toFixed(3) + "] " +
+               "post[" + postTime.toFixed(3) + "=" + postVal.toFixed(3) + "] " +
+               "cut src[" + srcAtStart.toFixed(3) + "\u2192" + srcAtEnd.toFixed(3) + "]";
     }
 
     app.beginUndoGroup("Reverse Stretch \u2192 Remap");
@@ -145,4 +176,43 @@ other Hold modes may shift the layer's visual extent after stretch reset.
     }
 
     alert("Reverse Stretch \u2192 Remap\n\n" + results.join("\n"));
+
+    function promptHandleFrames(defaultVal) {
+        var dlg = new Window("dialog", "Reverse Stretch \u2192 Remap");
+        dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
+        dlg.margins = 14; dlg.spacing = 10;
+
+        dlg.add("statictext", undefined,
+            "Handle length to encode in the remap curve.", { multiline: true });
+
+        var row = dlg.add("group");
+        row.orientation = "row"; row.alignChildren = ["left", "center"]; row.spacing = 8;
+        row.add("statictext", undefined, "Handle frames:");
+        var input = row.add("edittext", undefined, "" + defaultVal);
+        input.characters = 6;
+        input.active = true;
+
+        var hint = dlg.add("statictext", undefined,
+            "Match what you'll use in Shot Roundtrip. Keys are placed at \u00b1handle frames from the cut boundaries so playback stays reversed when the layer is later extended for handles.",
+            { multiline: true });
+        hint.preferredSize = [420, 48];
+
+        var btnGrp = dlg.add("group");
+        btnGrp.orientation = "row"; btnGrp.alignment = ["fill", "bottom"];
+        btnGrp.add("statictext", undefined, "").alignment = ["fill", "center"];
+        var btnCancel = btnGrp.add("button", undefined, "Cancel"); btnCancel.preferredSize = [80, 28];
+        var btnOK     = btnGrp.add("button", undefined, "Convert"); btnOK.preferredSize     = [100, 28];
+
+        var picked = null;
+        btnCancel.onClick = function () { dlg.close(2); };
+        btnOK.onClick = function () {
+            var n = parseInt(input.text, 10);
+            if (isNaN(n) || n < 0) { alert("Handle frames must be a non-negative integer."); return; }
+            picked = n;
+            dlg.close(1);
+        };
+
+        if (dlg.show() !== 1) return null;
+        return picked;
+    }
 })();

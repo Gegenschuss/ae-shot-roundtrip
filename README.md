@@ -122,6 +122,14 @@ work is underway. The pipeline is designed around this:
 ### Roundtrip
 
 > [!WARNING]
+> **Save a copy of your `.aep` before running Shot Roundtrip.** The
+> tool saves the project mid-run (the render queue needs a saved project
+> to start), which makes Cmd/Ctrl+Z unreliable as a rollback — once the
+> save fires, the only clean way back is the copy you made beforehand.
+> Duplicate the project file on disk, or use `File > Save As…` to a
+> `_before_roundtrip` filename, then run the roundtrip on the working copy.
+
+> [!WARNING]
 > **Rules the entire workflow relies on — do not break these:**
 >
 > 1. **Use a unique shot prefix per project** (e.g. `KM_`, `NM_`, `TS_`)
@@ -270,12 +278,6 @@ work is underway. The pipeline is designed around this:
   can strip them out. This rebuilds them from the existing shot comps so
   you can reconstruct the Premiere edit without re-running the full
   roundtrip. Prompts for a handle-frame count (default 50).
-- **Precompose Trimmed** — Precomposes each selected layer individually with
-  "move all attributes", sets the new precomp to the full parent-comp
-  duration, then trims the new precomp layer back to the original in/out.
-  Shot Roundtrip invokes this automatically as part of its time-remap
-  preflight (see Shot Roundtrip above). This standalone button is
-  available for manual use outside the roundtrip.
 - **Reverse Stretch → Remap** *(Little Toolbox)* — For each selected
   layer with negative stretch, rewrites the reversal as an equivalent
   time remap: stretch back to `100`, time remap enabled, and two
@@ -284,18 +286,24 @@ work is underway. The pipeline is designed around this:
   this button exposes it standalone so you can preview or debug the
   result on one layer at a time. Lives in the Little Toolbox panel
   (click `⚒ Toolbox` at the bottom of the main panel).
-- **Mute All Audio** — Walks every selected layer and recursively all
-  layers inside any precomps they reference, muting every audio switch
-  it finds. One undo step for the whole run.
-- **Precomp to Guide Preview** — Precomposes each selected layer with
-  "leave all attributes", scales the parent-comp layer 2× to compensate,
-  then inside the new precomp marks the inner footage as a guide layer,
-  halves its scale and position, and halves the new precomp's dimensions
-  (e.g. 4K UHD → HD). Net effect: a half-resolution working copy that
-  renders at its original size in the parent comp, with the footage
-  flagged as a guide so it doesn't contribute to renders. Auto-strips
-  AE's `.mov Comp N` suffix from the new comp name and uses `_downrez`
-  instead.
+- **Precompose Trimmed** *(Little Toolbox)* — Precomposes each selected
+  layer individually with "move all attributes", sets the new precomp to
+  the full parent-comp duration, then trims the new precomp layer back
+  to the original in/out. Shot Roundtrip invokes this automatically as
+  part of its time-remap preflight (see Shot Roundtrip above). This
+  standalone button is available for manual use outside the roundtrip.
+- **Mute All Audio** *(Little Toolbox)* — Walks every selected layer and
+  recursively all layers inside any precomps they reference, muting
+  every audio switch it finds. One undo step for the whole run.
+- **Precomp to Guide Preview** *(Little Toolbox)* — Precomposes each
+  selected layer with "leave all attributes", scales the parent-comp
+  layer 2× to compensate, then inside the new precomp marks the inner
+  footage as a guide layer, halves its scale and position, and halves
+  the new precomp's dimensions (e.g. 4K UHD → HD). Net effect: a
+  half-resolution working copy that renders at its original size in the
+  parent comp, with the footage flagged as a guide so it doesn't
+  contribute to renders. Auto-strips AE's `.mov Comp N` suffix from the
+  new comp name and uses `_downrez` instead.
 
 ## Premiere Pro companion — Trim Handles & Close Gaps
 
@@ -325,24 +333,28 @@ used in the AE Shot Roundtrip run so the trim removes the correct amount.
 GegenschussShotRoundtrip.jsx               # Dockable launcher panel (entry point)
 
 shot-roundtrip/                      # Core roundtrip script
-precompose-trimmed/                  # Helper: precompose with trim
 export-shot-xml/                     # FCPXML export for Resolve
 syntheyes-convert-jsx-to-aep/        # SynthEyes → AEP batch
 syntheyes-import-aep-to-ae/          # SynthEyes AEP import/wire-up
 import-renders/                      # VFX render re-import
 create-dynamiclink-comps/            # Standalone Dynamic Link builder
-helpers/                             # Mute audio, guide preview, reverse-stretch → remap
+little-toolbox/                      # Little Toolbox launcher panel
+precompose-trimmed/                  # Little Toolbox: precompose with trim
+helpers/                             # Little Toolbox scripts: mute audio, guide preview, reverse-stretch → remap, copy comp markers, extend precomp handles
 premiere-trim-handles-close-gaps/    # Premiere Pro companion extension
 ```
 
 ## FAQ
 
 **Is it going to mess up my project?**
-Save first, but no — a full Shot Roundtrip run is wrapped in a single
-undo group, so one Cmd/Ctrl+Z rolls back the whole thing. On disk,
-the only writes go into your chosen `Roundtrip/` folder (plate
-renders + a few auto-generated `README.txt` scaffolds). Nothing else
-is touched.
+**Make a copy of your `.aep` first.** The roundtrip saves the project
+mid-run (the render queue needs a saved project to start), so
+Cmd/Ctrl+Z isn't a reliable rollback — by the time you'd want to undo,
+the changes are already on disk. With a pre-run copy in hand, you can
+just reopen the copy and try again. On disk, the only writes the
+roundtrip itself makes outside the `.aep` go into your chosen
+`Roundtrip/` folder (plate renders + a few auto-generated `README.txt`
+scaffolds). Nothing else is touched.
 
 **Do I have to use Premiere?**
 No. The AE side works standalone. The Premiere extension only
