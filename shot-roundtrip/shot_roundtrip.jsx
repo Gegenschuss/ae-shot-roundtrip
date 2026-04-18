@@ -1919,16 +1919,24 @@ NOTES
         } catch(e) { reportError("PREP", e); try { progress.close(); } catch(eCP){} return; } finally { app.endUndoGroup(); }
 
         if (cancelCheck()) return;
-        if (!chkSkipRender.value) {
+        if (!chkSkipRender.value && renderItems.length > 0) {
             // Close the palette for the duration of the render: AE blocks the
             // script during renderQueue.render() so palette updates freeze
             // anyway, and AE's own render window takes over the UI — use its
             // cancel button if you need to stop the render mid-flight.
+            //
+            // Skip the render call entirely when we didn't queue anything this
+            // run (every shot was a duplicate, etc.). Calling render() on a
+            // queue that only holds leftover items from a previous failed run
+            // can trigger AE's "Overwrite existing file?" modal, which often
+            // appears behind the main window and looks like a UI freeze.
             progress.update("Saving project and handing off to AE's render queue\u2026", "AE's render window will take over now.", 60);
             progress.close();
             try { proj.save(); proj.renderQueue.render(); } catch(e) { reportError("RENDER", e, "Check OM Template and Disk Space."); return; }
             progress = makeProgressPanel();
             progress.update("Render finished, importing plates\u2026", "", 65);
+        } else if (!chkSkipRender.value && renderItems.length === 0) {
+            progress.update("No new shots to render — all were already processed or skipped.", "", 60);
         }
 
         app.beginUndoGroup("Roundtrip Finish");
