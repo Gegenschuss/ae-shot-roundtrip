@@ -456,324 +456,6 @@ NOTES
             var f = proj.items.addFolder(shotName); f.parentFolder = parentBin; f.label = 2; return f; // Yellow — shot bin
         }
 
-        // Snapshots a property group into plain JS objects (read-only pass).
-        // All reads happen before any DOM write so AE live references cannot go stale.
-        function serializePropertyGroup(src) {
-            var result = [];
-            for (var i = 1; i <= src.numProperties; i++) {
-                var sp = src.property(i);
-                if (!sp) continue;
-                var entry = { matchName: sp.matchName, type: sp.propertyType };
-                try {
-                    if (sp.propertyType === PropertyType.PROPERTY) {
-                        entry.isReadOnly = sp.isReadOnly;
-                        entry.isSpatial  = sp.isSpatial;
-                        entry.keys = [];
-                        if (sp.numKeys > 0) {
-                            for (var k = 1; k <= sp.numKeys; k++) {
-                                var kd = { time: sp.keyTime(k) };
-                                try { kd.value    = sp.keyValue(k); }           catch(e) {}
-                                try { kd.inInterp  = sp.keyInInterpolationType(k);
-                                      kd.outInterp = sp.keyOutInterpolationType(k); } catch(e) {}
-                                try { kd.inEase    = sp.keyInTemporalEase(k);
-                                      kd.outEase   = sp.keyOutTemporalEase(k);  } catch(e) {}
-                                if (sp.isSpatial) {
-                                    try { kd.inTan  = sp.keyInSpatialTangent(k);
-                                          kd.outTan = sp.keyOutSpatialTangent(k); } catch(e) {}
-                                }
-                                entry.keys.push(kd);
-                            }
-                        } else if (!sp.isReadOnly) {
-                            try { entry.value = sp.value; } catch(e) {}
-                        }
-                        if (sp.expressionEnabled) {
-                            try { entry.expression = sp.expression; } catch(e) {}
-                        }
-                    } else {
-                        entry.children = serializePropertyGroup(sp);
-                    }
-                } catch(e) {}
-                result.push(entry);
-            }
-            return result;
-        }
-
-        // Applies a serialized property snapshot onto a destination property group (write pass).
-        // Looks up properties by matchName first; falls back to index to survive any drift.
-        // timeOffset is subtracted from all keyframe times (main comp time → container comp time).
-        function applyPropertyGroup(data, dst, timeOffset) {
-            for (var i = 0; i < data.length; i++) {
-                var entry = data[i];
-                var dp = null;
-                try { dp = dst.property(entry.matchName); } catch(e) {}
-                if (!dp) try { dp = dst.property(i + 1); } catch(e) {}
-                if (!dp) continue;
-                try {
-                    if (entry.type === PropertyType.PROPERTY) {
-                        if (entry.keys && entry.keys.length > 0) {
-                            // Pass 1: values
-                            for (var k = 0; k < entry.keys.length; k++) {
-                                var kd = entry.keys[k];
-                                if (kd.value !== undefined) {
-                                    try { dp.setValueAtTime(kd.time - timeOffset, kd.value); } catch(e) {}
-                                }
-                            }
-                            // Pass 2: interpolation + easing + tangents
-                            for (var k = 0; k < entry.keys.length; k++) {
-                                var kd = entry.keys[k];
-                                var ki = k + 1; // 1-based key index in destination
-                                if (kd.inInterp !== undefined) {
-                                    try { dp.setInterpolationTypeAtKey(ki, kd.inInterp, kd.outInterp); } catch(e) {}
-                                }
-                                if (kd.inEase !== undefined) {
-                                    try { dp.setTemporalEaseAtKey(ki, kd.inEase, kd.outEase); } catch(e) {}
-                                }
-                                if (kd.inTan !== undefined) {
-                                    try { dp.setSpatialTangentsAtKey(ki, kd.inTan, kd.outTan); } catch(e) {}
-                                }
-                            }
-                        } else if (entry.value !== undefined && !entry.isReadOnly) {
-                            var appliedVal = entry.value;
-                            if (appliedVal instanceof File) {
-                                // Rebuild the File with its absolute fsName so AE doesn't
-                                // re-resolve via the destination comp's relative-path lookup —
-                                // that re-resolution is what triggers the "Locate LUT file"
-                                // dialog on Apply Color LUT and other file-bound effects. If
-                                // the file is genuinely missing, skip the write entirely
-                                // rather than fire the dialog and block the batch; the
-                                // effect still exists on the destination with an empty slot
-                                // that the user can re-point post-roundtrip.
-                                var absFsName = null;
-                                try { absFsName = appliedVal.fsName; } catch (eFN) {}
-                                if (absFsName) {
-                                    var freshFile = new File(absFsName);
-                                    if (freshFile.exists) {
-                                        appliedVal = freshFile;
-                                    } else {
-                                        continue;
-                                    }
-                                }
-                            }
-                            try { dp.setValue(appliedVal); } catch(e) {}
-                        }
-                        if (entry.expression !== undefined) {
-                            try { dp.expression = entry.expression; dp.expressionEnabled = true; } catch(e) {}
-                        }
-                    } else if (entry.children) {
-                        applyPropertyGroup(entry.children, dp, timeOffset);
-                    }
-                } catch(e) {}
-            }
-        }
-
-        // Moves all layer attributes (transforms, effects, masks, time remap, opacity,
-        // blending mode) from srcLayer in the main comp to dstLayer inside the container comp.
-        // Uses a two-phase serialize-then-apply pattern to avoid AE DOM stale reference issues.
-        // Native transforms on srcLayer are reset to identity after the move.
-        // Only used for direct footage layers — precomp layers keep their attribs in place.
-        function moveLayerAttribs(srcLayer, dstLayer) {
-            var timeOffset  = srcLayer.startTime;
-            var mainComp    = srcLayer.containingComp;
-            var dstComp     = dstLayer.containingComp;
-            // Position correction for any comp/source size difference (zero when sizes match)
-            var posCorX = (dstComp.width  - mainComp.width)  / 2;
-            var posCorY = (dstComp.height - mainComp.height) / 2;
-
-            // ── Phase 1: serialize transforms + time remap into plain JS ──────────
-            // All reads happen before any DOM write so references cannot go stale.
-            var srcTG    = srcLayer.property("ADBE Transform Group");
-            var txNames  = ["ADBE Anchor Point", "ADBE Position", "ADBE Scale", "ADBE Rotate Z"];
-            if (srcLayer.threeDLayer) { txNames.push("ADBE Rotate X", "ADBE Rotate Y", "ADBE Orientation"); }
-            var txSnap = {};
-            for (var ti = 0; ti < txNames.length; ti++) {
-                try {
-                    var sp = srcTG.property(txNames[ti]);
-                    if (!sp) continue;
-                    var pd = { keys: [], isSpatial: sp.isSpatial };
-                    if (sp.numKeys > 0) {
-                        for (var k = 1; k <= sp.numKeys; k++) {
-                            var kd = { time: sp.keyTime(k) };
-                            try { kd.value    = sp.keyValue(k); }                                              catch(e) {}
-                            try { kd.inInterp = sp.keyInInterpolationType(k); kd.outInterp = sp.keyOutInterpolationType(k); } catch(e) {}
-                            try { kd.inEase   = sp.keyInTemporalEase(k);      kd.outEase   = sp.keyOutTemporalEase(k);      } catch(e) {}
-                            if (sp.isSpatial) { try { kd.inTan = sp.keyInSpatialTangent(k); kd.outTan = sp.keyOutSpatialTangent(k); } catch(e) {} }
-                            pd.keys.push(kd);
-                        }
-                    } else { try { pd.value = sp.value; } catch(e) {} }
-                    txSnap[txNames[ti]] = pd;
-                } catch(e) {}
-            }
-
-            var trSnap = null;
-            if (srcLayer.timeRemapEnabled) {
-                try {
-                    var srcTRp = srcLayer.property("ADBE Time Remapping");
-                    if (srcTRp) {
-                        trSnap = { keys: [] };
-                        for (var k = 1; k <= srcTRp.numKeys; k++) {
-                            var kd = { time: srcTRp.keyTime(k) };
-                            try { kd.value    = srcTRp.keyValue(k); }                                                   catch(e) {}
-                            try { kd.inInterp = srcTRp.keyInInterpolationType(k); kd.outInterp = srcTRp.keyOutInterpolationType(k); } catch(e) {}
-                            try { kd.inEase   = srcTRp.keyInTemporalEase(k);      kd.outEase   = srcTRp.keyOutTemporalEase(k);      } catch(e) {}
-                            trSnap.keys.push(kd);
-                        }
-                    }
-                } catch(e) {}
-            }
-
-            // Helper: write serialized keyframe data (or static value) onto one effect property.
-            // posCorr = [dx, dy] shifts 2D position values; pass undefined for non-position props.
-            function writeTxProp(dp, pd, tOff, posCorr) {
-                if (!dp || !pd) return;
-                if (pd.keys && pd.keys.length > 0) {
-                    for (var k = 0; k < pd.keys.length; k++) {
-                        var kd = pd.keys[k]; var val = kd.value;
-                        if (posCorr && val !== undefined) val = [val[0] + posCorr[0], val[1] + posCorr[1]];
-                        try { dp.setValueAtTime(kd.time - tOff, val); } catch(e) {}
-                    }
-                    for (var k = 0; k < pd.keys.length; k++) {
-                        var ki = k + 1; var kd = pd.keys[k];
-                        if (kd.inInterp !== undefined) { try { dp.setInterpolationTypeAtKey(ki, kd.inInterp, kd.outInterp); } catch(e) {} }
-                        if (kd.inEase   !== undefined) { try { dp.setTemporalEaseAtKey(ki,   kd.inEase,   kd.outEase);      } catch(e) {} }
-                        if (kd.inTan    !== undefined) { try { dp.setSpatialTangentsAtKey(ki, kd.inTan,   kd.outTan);       } catch(e) {} }
-                    }
-                } else if (pd.value !== undefined) {
-                    var val = pd.value;
-                    if (posCorr && val !== undefined) val = [val[0] + posCorr[0], val[1] + posCorr[1]];
-                    try { dp.setValue(val); } catch(e) {}
-                }
-            }
-
-            // ── Transforms → dstLayer native Transform group ──────────────────────
-            // Same matchnames as src; position values get the size-difference correction.
-            var dstTG = dstLayer.property("ADBE Transform Group");
-            var dstFx = dstLayer.property("ADBE Effect Parade");
-            for (var ti = 0; ti < txNames.length; ti++) {
-                var pName = txNames[ti];
-                var pd = txSnap[pName];
-                if (!pd) continue;
-                var isPos = (pName === "ADBE Position");
-                try { writeTxProp(dstTG.property(pName), pd, timeOffset, isPos ? [posCorX, posCorY] : undefined); } catch(e) {}
-            }
-
-            // ── Effects ───────────────────────────────────────────────────────────
-            // Wrap the copy loop in beginSuppressDialogs as a safety net: any
-            // file-type property that slips past applyPropertyGroup's fsName
-            // rewrap (or any other effect setValue that wants to pop a modal)
-            // should fail silently instead of blocking the batch. The
-            // `suppressed` flag keeps this a no-op on AE versions where the API
-            // isn't available.
-            var srcFx = srcLayer.property("ADBE Effect Parade");
-            if (srcFx && dstFx) {
-                var suppressed = false;
-                try { app.beginSuppressDialogs(); suppressed = true; } catch (eSD) {}
-                try {
-                    for (var e = srcFx.numProperties; e >= 1; e--) {
-                        var se = srcFx.property(e);
-                        if (!se) continue;
-                        var snap;
-                        try { snap = serializePropertyGroup(se); } catch(e2) { continue; }
-                        try {
-                            var de = dstFx.addProperty(se.matchName);
-                            applyPropertyGroup(snap, de, timeOffset);
-                            se.remove();
-                        } catch(e2) {}
-                    }
-                } finally {
-                    if (suppressed) { try { app.endSuppressDialogs(false); } catch (eED) {} }
-                }
-            }
-
-            // ── Masks ─────────────────────────────────────────────────────────────
-            var srcMasks = srcLayer.property("ADBE Mask Parade");
-            var dstMasks = dstLayer.property("ADBE Mask Parade");
-            if (srcMasks && dstMasks) {
-                for (var m = srcMasks.numProperties; m >= 1; m--) {
-                    var sm = srcMasks.property(m);
-                    if (!sm) continue;
-                    var msnap;
-                    try { msnap = serializePropertyGroup(sm); } catch(e3) { continue; }
-                    try {
-                        var dm = dstMasks.addProperty("ADBE Mask Atom");
-                        applyPropertyGroup(msnap, dm, timeOffset);
-                        sm.remove();
-                    } catch(e3) {}
-                }
-            }
-
-            // ── Time Remap ────────────────────────────────────────────────────────
-            if (trSnap && trSnap.keys.length > 0) {
-                try { dstLayer.timeRemapEnabled = true; } catch(eTR) {}
-                try {
-                    var dstTRp = dstLayer.property("ADBE Time Remapping");
-                    // Remove auto-generated keys backward so index shifting doesn't matter.
-                    // Each removal is individually guarded — AE may refuse the very last key.
-                    for (var k = dstTRp.numKeys; k >= 1; k--) { try { dstTRp.removeKey(k); } catch(e) {} }
-                } catch(eTR) {}
-                try {
-                    var dstTRp = dstLayer.property("ADBE Time Remapping");
-                    for (var k = 0; k < trSnap.keys.length; k++) {
-                        var kd = trSnap.keys[k];
-                        try { dstTRp.setValueAtTime(kd.time - timeOffset, kd.value); } catch(e) {}
-                    }
-                    for (var k = 0; k < trSnap.keys.length; k++) {
-                        var ki = k + 1; var kd = trSnap.keys[k];
-                        if (kd.inInterp !== undefined) { try { dstTRp.setInterpolationTypeAtKey(ki, kd.inInterp, kd.outInterp); } catch(e) {} }
-                        if (kd.inEase   !== undefined) { try { dstTRp.setTemporalEaseAtKey(ki,   kd.inEase,   kd.outEase);      } catch(e) {} }
-                    }
-                } catch(eTR) {}
-                try { srcLayer.timeRemapEnabled = false; } catch(eTR) {}
-            }
-
-            // ── Blending mode & opacity ───────────────────────────────────────────
-            try { dstLayer.blendingMode = srcLayer.blendingMode; srcLayer.blendingMode = BlendingMode.NORMAL; } catch(e4) {}
-            try {
-                var srcOp = srcTG.property("ADBE Opacity");
-                var dstOp = dstLayer.property("ADBE Transform Group").property("ADBE Opacity");
-                if (srcOp && dstOp) {
-                    if (srcOp.numKeys > 0) {
-                        for (var k = 1; k <= srcOp.numKeys; k++) {
-                            try { dstOp.setValueAtTime(srcOp.keyTime(k) - timeOffset, srcOp.keyValue(k)); } catch(ke) {}
-                        }
-                        for (var k = 1; k <= srcOp.numKeys; k++) {
-                            try { dstOp.setInterpolationTypeAtKey(k, srcOp.keyInInterpolationType(k), srcOp.keyOutInterpolationType(k)); } catch(ke) {}
-                            try { dstOp.setTemporalEaseAtKey(k, srcOp.keyInTemporalEase(k), srcOp.keyOutTemporalEase(k)); } catch(ke) {}
-                        }
-                        while (srcOp.numKeys > 0) srcOp.removeKey(1);
-                    } else if (srcOp.value !== 100) {
-                        dstOp.setValue(srcOp.value);
-                        srcOp.setValue(100);
-                    }
-                    if (srcOp.expressionEnabled) { dstOp.expression = srcOp.expression; dstOp.expressionEnabled = true; srcOp.expressionEnabled = false; }
-                }
-            } catch(e5) {}
-
-            // ── Reset native transforms on srcLayer to identity ───────────────────
-            try {
-                var apProp = srcTG.property("ADBE Anchor Point");
-                while (apProp.numKeys > 0) apProp.removeKey(1);
-                try { apProp.setValue([srcLayer.width / 2, srcLayer.height / 2]); } catch(e) {}
-
-                var posProp = srcTG.property("ADBE Position");
-                while (posProp.numKeys > 0) posProp.removeKey(1);
-                try { posProp.setValue([mainComp.width / 2, mainComp.height / 2]); } catch(e) {}
-
-                var scProp = srcTG.property("ADBE Scale");
-                while (scProp.numKeys > 0) scProp.removeKey(1);
-                try { scProp.setValue(srcLayer.threeDLayer ? [100, 100, 100] : [100, 100]); } catch(e) {}
-
-                var rotProp = srcTG.property("ADBE Rotate Z");
-                while (rotProp.numKeys > 0) rotProp.removeKey(1);
-                try { rotProp.setValue(0); } catch(e) {}
-
-                if (srcLayer.threeDLayer) {
-                    var rxP = srcTG.property("ADBE Rotate X"); while (rxP.numKeys > 0) rxP.removeKey(1); try { rxP.setValue(0); }         catch(e) {}
-                    var ryP = srcTG.property("ADBE Rotate Y"); while (ryP.numKeys > 0) ryP.removeKey(1); try { ryP.setValue(0); }         catch(e) {}
-                    var orP = srcTG.property("ADBE Orientation"); while (orP.numKeys > 0) orP.removeKey(1); try { orP.setValue([0,0,0]); } catch(e) {}
-                }
-            } catch(eReset) {}
-        }
-
         // Returns { start, end } in source footage time for a direct footage layer,
         // accounting for time remap or stretch so handles are added at the right place.
         function getRequiredSourceRange(layer) {
@@ -1086,7 +768,7 @@ NOTES
             try { if (l.source.mainSource && l.source.mainSource.file) isFile = true; } catch(e) {}
             var isPC = (l.source instanceof CompItem);
             if (isFile || isPC) {
-                selLayers.push({ layer: l, isPrecomp: isPC });
+                selLayers.push({ layer: l, isPrecomp: isPC, mainLayerIdx: l.index });
             } else {
                 skippedLayers.push(l.name + " (Solid/Shape/Text)");
             }
@@ -1377,7 +1059,7 @@ NOTES
                 try { if (rLayer.source.mainSource && rLayer.source.mainSource.file) rIsFile = true; } catch(eRIS) {}
                 var rIsPrecomp = (rLayer.source instanceof CompItem);
                 if (rIsFile || rIsPrecomp) {
-                    selLayers.push({ layer: rLayer, isPrecomp: rIsPrecomp });
+                    selLayers.push({ layer: rLayer, isPrecomp: rIsPrecomp, mainLayerIdx: rLayer.index });
                 } else {
                     skippedLayers.push(rLayer.name + " (Solid/Shape/Text)");
                 }
@@ -1834,11 +1516,22 @@ NOTES
                     var needsWrap = layer.timeRemapEnabled ||
                                     Math.abs(layer.stretch - 100) > 0.01;
                     if (needsWrap) {
+                        // Capture original timing before precompose invalidates the ref —
+                        // AE's native precompose does not reliably preserve inPoint/outPoint
+                        // on the new mainComp layer, so we restore them ourselves.
+                        var origInPointPC  = layer.inPoint;
+                        var origOutPointPC = layer.outPoint;
                         var layerIdx = layer.index; // read before precompose invalidates the ref
                         try { mainComp.layers.precompose([layerIdx], shotName + "_container" + osSuffix, true); } catch(ePC) {}
                         // Always re-fetch outside the try — whether precompose succeeded or failed,
                         // mainComp.layer(idx) is valid: it's the wrapper on success, the original on failure.
                         layer = mainComp.layer(layerIdx);
+                        // Restore original in/out so the edit's cut placement survives.
+                        try {
+                            layer.startTime = 0;
+                            layer.inPoint   = origInPointPC;
+                            layer.outPoint  = origOutPointPC;
+                        } catch (eTimingPC) {}
                         // Single-shot precomp → shot bin. Multi-footage container's
                         // per-range bin is handled by the rename block below.
                         if (item.totalInPrecomp === 1) {
@@ -1851,6 +1544,13 @@ NOTES
                         for (var upd = i + 1; upd < expandedLayers.length; upd++) {
                             if (expandedLayers[upd].mainLayerIdx === layerIdx) {
                                 expandedLayers[upd].layer = layer;
+                            }
+                        }
+                        // Same patch for selLayers so the dynamicLink build loop
+                        // later doesn't iterate stale refs ("Object is invalid").
+                        for (var sUpdP = 0; sUpdP < selLayers.length; sUpdP++) {
+                            if (selLayers[sUpdP].mainLayerIdx === layerIdx) {
+                                selLayers[sUpdP].layer = layer;
                             }
                         }
                     } else {
@@ -1888,7 +1588,7 @@ NOTES
 
                     // No container comp. Mark source as processed, replace footage layer
                     // inside the deepest precomp with shotComp. All transforms/effects on
-                    // footageLayer are preserved in place — no moveLayerAttribs needed.
+                    // footageLayer are preserved in place — nothing to transplant.
                     // Key on the ORIGINAL source id (pre-replaceSource) so later iterations
                     // can still detect the dupe after this replacement mutates the live source.
                     if (item.originalSourceId) processedSourceIds[item.originalSourceId] = { bin: shotBin };
@@ -1950,39 +1650,144 @@ NOTES
 
                 } else {
                     // ── 2. Container (direct footage path) ────────────────────
-                    var containerComp = proj.items.addComp(shotName + "_container" + osSuffix, source.width, source.height, source.pixelAspect, source.duration, source.frameRate);
+                    // Native precompose with moveAllAttributes=true. AE handles
+                    // effect stacking order, masks, transforms, time remap,
+                    // expressions, layer flags (motion blur, 3D, quality, frame
+                    // blending, sampling, preserve-transparency), blending mode,
+                    // parenting, and file bindings on effects like Apply Color
+                    // LUT — all natively and without the silent correctness
+                    // bugs that our hand-rolled moveLayerAttribs had
+                    // (effect-order reversal, dropped layer flags, LUT locate
+                    // dialogs). The precomp path (isPrecomp branch above)
+                    // already uses this same pattern; we now use it here too
+                    // for the direct-footage path.
+                    //
+                    // Capture the ORIGINAL layer's timing before precompose
+                    // invalidates the reference. AE's native precompose does NOT
+                    // reliably preserve the mainComp precomp layer's in/out —
+                    // the new precomp layer tends to span the full comp by
+                    // default, which would wipe out the edit's cut placement.
+                    // We restore the original in/out/startTime ourselves below.
+                    var origInPoint   = layer.inPoint;
+                    var origOutPoint  = layer.outPoint;
+                    var layerIdx      = layer.index; // read before precompose invalidates the ref
+                    var containerComp;
+                    try {
+                        containerComp = mainComp.layers.precompose([layerIdx], shotName + "_container" + osSuffix, true);
+                    } catch (ePC) {
+                        reportError("PREP", ePC, "Direct-footage precompose failed for " + shotName);
+                        return;
+                    }
                     containerComp.displayStartTime = 0;
-                    containerComp.parentFolder = shotBin;
-                    containerComp.label = 8; // Blue — container (editorial)
-                    var containerInner = containerComp.layers.add(shotComp);
-                    containerInner.startTime = 0;
-                    containerInner.inPoint  = fullStart;
-                    containerInner.outPoint = fullStart + fullDurationSec;
-                    containerComp.markerProperty.setValueAtTime(cutStart, cutMarker("cut in"));
-                    containerComp.markerProperty.setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
-                    plateInner.property("Marker").setValueAtTime(cutStart, cutMarker("cut in"));
-                    plateInner.property("Marker").setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
-                    containerInner.property("Marker").setValueAtTime(cutStart, cutMarker("cut in"));
-                    containerInner.property("Marker").setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
-                    var blDirect = shotComp.layers.byName("GUIDE_BURNIN"); if (blDirect) { blDirect.locked=false; blDirect.moveToBeginning(); blDirect.locked=true; }
+                    containerComp.parentFolder     = shotBin;
+                    containerComp.label            = 8; // Blue — container (editorial)
 
-                    // Move transforms / effects / masks / time remap to containerInner; reset on layer
-                    moveLayerAttribs(layer, containerInner);
-
-                    // When overscan is active, moveLayerAttribs copied the original anchor (sized
-                    // for the footage) onto containerInner which now shows the larger shotComp.
-                    // The mismatch shifts sampling by half the overscan margin — correct it here.
-                    if (shotOverscan > 0) {
-                        try {
-                            var osOffX = (osWidth  - source.width)  / 2;
-                            var osOffY = (osHeight - source.height) / 2;
-                            var apCI = containerInner.property("ADBE Transform Group").property("ADBE Anchor Point");
-                            var curCI = apCI.value;
-                            apCI.setValue([curCI[0] + osOffX, curCI[1] + osOffY]);
-                        } catch(eOsAP2) {}
+                    // The original footage layer now lives inside containerComp with
+                    // every attribute moved in by AE. Find it, then swap its source
+                    // to the shot's render target (shotComp).
+                    var containerInner = null;
+                    for (var ci = 1; ci <= containerComp.numLayers; ci++) {
+                        var cl = containerComp.layer(ci);
+                        try { if (cl.source === source) { containerInner = cl; break; } } catch(eCL) {}
+                    }
+                    if (!containerInner && containerComp.numLayers > 0) {
+                        // Fallback: precompose only put one layer in if we got here.
+                        containerInner = containerComp.layer(1);
                     }
 
-                    layer.replaceSource(containerComp, false);
+                    // Shrink containerComp from mainComp.duration down to the
+                    // shot's own cut+handles length so opening the container
+                    // shows a clean 0-based timeline instead of a huge amount
+                    // of pre/post dead space.
+                    try {
+                        containerComp.duration = fullDurationSec;
+                        containerComp.displayStartTime = 0;
+                    } catch(eDur) {}
+
+                    if (containerInner) {
+                        containerInner.replaceSource(shotComp, false);
+                        // Shift containerInner so the first rendered frame sits
+                        // at container time 0 (edit-friendly). shotComp's rendered
+                        // content lives at shotComp-time fullStart..fullEnd;
+                        // startTime = -fullStart makes container time 0 line up
+                        // with that first rendered frame.
+                        containerInner.startTime = -fullStart;
+                        containerInner.inPoint   = 0;
+                        containerInner.outPoint  = fullDurationSec;
+                        // Markers now in container-local time: cut_in at handleSec,
+                        // cut_out at handleSec + cutDuration. Same for
+                        // containerInner (layer-level). plateInner markers stay at
+                        // source-time cutStart/cutEnd because shotComp's internal
+                        // timeline IS source time.
+                        containerComp.markerProperty.setValueAtTime(handleSec,               cutMarker("cut in"));
+                        containerComp.markerProperty.setValueAtTime(handleSec + cutDuration, cutMarker("cut out"));
+                        plateInner.property("Marker").setValueAtTime(cutStart,               cutMarker("cut in"));
+                        plateInner.property("Marker").setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
+                        containerInner.property("Marker").setValueAtTime(handleSec,               cutMarker("cut in"));
+                        containerInner.property("Marker").setValueAtTime(handleSec + cutDuration, cutMarker("cut out"));
+                        var blDirect = shotComp.layers.byName("GUIDE_BURNIN");
+                        if (blDirect) { blDirect.locked = false; blDirect.moveToBeginning(); blDirect.locked = true; }
+
+                        // Overscan: containerInner's anchor was set for source-sized
+                        // footage, but shotComp is osWidth × osHeight. Shift to
+                        // re-center sampling on the inflated source.
+                        if (shotOverscan > 0) {
+                            try {
+                                var osOffX = (osWidth  - source.width)  / 2;
+                                var osOffY = (osHeight - source.height) / 2;
+                                var apCI = containerInner.property("ADBE Transform Group").property("ADBE Anchor Point");
+                                var curCI = apCI.value;
+                                apCI.setValue([curCI[0] + osOffX, curCI[1] + osOffY]);
+                            } catch(eOsAP2) {}
+                        }
+                    }
+
+                    // Re-bind `layer` to the new precomp layer in mainComp so the
+                    // downstream `layer.inPoint` read for Nuke data still works.
+                    // AE places the new precomp layer at the same index the original
+                    // occupied; if anything shifted, scan for the layer whose source
+                    // is our new containerComp.
+                    try { layer = mainComp.layer(layerIdx); } catch(eLIdx) {}
+                    var sourceMatchOK = false;
+                    try { sourceMatchOK = (layer && layer.source === containerComp); } catch(eSM) {}
+                    if (!sourceMatchOK) {
+                        for (var mL = 1; mL <= mainComp.numLayers; mL++) {
+                            try {
+                                if (mainComp.layer(mL).source === containerComp) { layer = mainComp.layer(mL); break; }
+                            } catch(eML) {}
+                        }
+                    }
+
+                    // Align the mainComp precomp layer with the now-shifted
+                    // container timeline. Container time 0 = first rendered handle
+                    // frame; we want that to appear at mainComp time
+                    // (origInPoint - handleSec) so the cut still lands exactly at
+                    // origInPoint..origOutPoint (the editorial cut placement).
+                    if (layer) {
+                        try {
+                            layer.startTime = origInPoint - handleSec;
+                            layer.inPoint   = origInPoint;
+                            layer.outPoint  = origOutPoint;
+                        } catch (eTiming) {}
+                    }
+
+                    // Patch every selLayers / expandedLayers entry that still holds a
+                    // reference to the pre-precompose layer. Without this, the
+                    // dynamicLink build loop later iterates selLayers and hits stale
+                    // "Object is invalid" refs for every layer that went through
+                    // native precompose.
+                    for (var sUpd = 0; sUpd < selLayers.length; sUpd++) {
+                        if (selLayers[sUpd].mainLayerIdx === layerIdx) {
+                            selLayers[sUpd].layer     = layer;
+                            selLayers[sUpd].isPrecomp = true;
+                        }
+                    }
+                    for (var eUpd = i + 1; eUpd < expandedLayers.length; eUpd++) {
+                        if (expandedLayers[eUpd].mainLayerIdx === layerIdx) {
+                            expandedLayers[eUpd].layer = layer;
+                        }
+                    }
+
                     containerDurFrames = Math.round(source.duration * safeFPS);
                 }
 
