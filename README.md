@@ -28,7 +28,20 @@ All tools are accessible from a single dockable ScriptUI launcher panel.
 > Duplicate the project file on disk, or use `File > Save As…` to a
 > `_before_roundtrip` filename, then run the roundtrip on the working copy.
 
-## Why this exists
+> [!NOTE]
+> **Run this early in your AE production — before you pile on expressions,
+> stacked effects, rotoscoping, parenting, track mattes, or other layer
+> setups.** Shot Roundtrip wraps each selected layer into a container comp
+> and moves its attributes over. We try our best to preserve what was
+> there — transforms, keyframes, effects, masks, time remap, and file
+> bindings on effects like Apply Color LUT — but there are edges where
+> things won't survive perfectly: expressions that reference other layers
+> in the original comp, effects with a "Layer" dropdown (Displacement Map,
+> Set Matte, etc.), track mattes from neighbouring layers, Roto Brush /
+> Puppet / Content-Aware state, and layer parenting. Earlier in the edit
+> = less of that work is at risk. We're working to widen what survives,
+> but the safest time to run is right after the edit lands in AE, before
+> VFX work has been layered on top.
 
 At [Gegenschuss](https://gegenschuss.com) we work heavily with
 Adobe CC. Edits are cut in Premiere and move to After Effects once the edit

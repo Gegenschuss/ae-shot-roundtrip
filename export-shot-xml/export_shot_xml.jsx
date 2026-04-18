@@ -265,9 +265,14 @@
         }
     }
 
+    // Finds a folder named "shots" (case-insensitive) anywhere in the project,
+    // not just at root. The main shot_roundtrip.jsx uses proj.items (flat
+    // scan), so if a pre-existing Shots folder lived nested (e.g. under DATA/),
+    // it got adopted and written into. We need the same reach here or the
+    // XML export can't locate its own output bin.
     function findShotsFolder(root) {
-        for (var i = 1; i <= root.numItems; i++) {
-            var item = root.item(i);
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
             if (item instanceof FolderItem && item.name.toLowerCase() === "shots") {
                 return item;
             }
