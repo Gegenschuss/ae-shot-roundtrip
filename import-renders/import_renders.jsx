@@ -18,17 +18,30 @@ returns from two sources:
   2. a flat {shots}/_grade/ folder  – Resolve-graded returns (optional),
                                       matched to shots by filename prefix
 
-Layers are stacked in the comp with a fixed category order:
+Per shot, the script ensures a {shot}_plate precomp exists inside
+{shot}_comp. On first run it auto-creates it by pre-composing the hero
+plate layer with "Leave all attributes in the original composition" —
+every effect, transform, mask, and keyframe on the hero stays on the
+OUTER layer in _comp, while only the raw plate source moves into the
+new precomp. The new precomp is filed under the shot's plate/ bin.
+
+All imported renders and grades are added INSIDE that precomp, with a
+fixed category order:
 
     Top  →  grade   (from _grade/, matched by filename prefix)
             render  (from {shot}/render/)
             plate   (enabled state is never touched — you manage it)
 
 Within each category the newest file wins; older versions are imported
-but disabled.  Category order is fixed, so a VFX re-render after a grade
-does not cover the grade. Plate variants (stabilized, denoised, retimed
-versions rendered alongside the original) are treated as plates too —
-renders and grades always stack above the topmost plate-like layer.
+but disabled. Category order is fixed, so a VFX re-render after a grade
+does not cover the grade. Since the hero layer's effects live on the
+OUTER layer, not the inner sources, swapping the visible source inside
+the precomp never duplicates or misaligns any look work.
+
+Migration note: if a comp was previously processed by an older version
+of this script (flat layers stacked directly in _comp), those pre-
+existing layers are left in place on first run. New imports go into
+the new _plate precomp. Consolidate manually if desired.
 
 NAMING CONVENTION (STRICT)
 --------------------------
@@ -334,6 +347,80 @@ optional flat _grade/ folder for Resolve returns:
         return result;
     }
 
+    // Derive the inner plate-precomp name from a shotComp name.
+    //   "KM_010_comp"    -> "KM_010_plate"
+    //   "KM_010_comp_OS" -> "KM_010_plate_OS"
+    function plateCompNameFor(compName) {
+        return compName.replace(/_comp(_OS)?$/i, function (_m, os) {
+            return "_plate" + (os || "");
+        });
+    }
+
+    // Ensure a {shot}_plate precomp exists inside `comp` and return it.
+    // On first run, pre-composes the hero/plate layer with
+    // moveAllAttributes=false ("Leave all attributes in the original
+    // composition") so every effect, transform, mask, and keyframe on the
+    // hero stays on the OUTER layer in _comp while only the raw plate
+    // source moves into the new precomp. Imports then stack INSIDE this
+    // precomp, so swapping visibility never duplicates any look work.
+    // Returns null if no hero layer is found (caller falls back to adding
+    // imports flat into the outer comp, matching the legacy behavior).
+    // readOnly=true skips creation — used for dry-run so previewing an
+    // import never mutates the project.
+    function ensurePlatePrecomp(comp, shotName, readOnly) {
+        var targetName = plateCompNameFor(comp.name);
+        // Already wired? Look for a layer in `comp` whose source is a
+        // CompItem with the expected name.
+        for (var i = 1; i <= comp.numLayers; i++) {
+            var L = comp.layer(i);
+            try {
+                if (L.source instanceof CompItem && L.source.name === targetName) {
+                    return L.source;
+                }
+            } catch (e) {}
+        }
+        if (readOnly) return null;
+        // Not wired. Find the hero plate layer to precompose.
+        var plateLayer = findPlateLayer(comp, shotName);
+        if (!plateLayer) return null;
+
+        // moveAllAttributes=false is only valid for a single layer — which
+        // is exactly what we want. AE returns the new CompItem.
+        var newPrecomp;
+        try {
+            newPrecomp = comp.layers.precompose([plateLayer.index], targetName, false);
+        } catch (ePC) {
+            return null;
+        }
+
+        // File the new precomp under {Shots}/{shot}/plate/ so it sits next
+        // to the plate footage item it wraps.
+        try {
+            var shotBin      = getChildBin(binShots, shotName);
+            var shotPlateBin = shotBin ? getOrCreateChildBin(shotBin, "plate") : null;
+            if (shotPlateBin) newPrecomp.parentFolder = shotPlateBin;
+        } catch (eBin) {}
+
+        // Copy the outer comp's cut markers onto the new precomp so the
+        // existing alignment cascade (which reads comp.markerProperty)
+        // finds them inside the precomp too.
+        try {
+            if (comp.markerProperty && comp.markerProperty.numKeys > 0) {
+                var dstMkr = newPrecomp.markerProperty;
+                for (var mi = 1; mi <= comp.markerProperty.numKeys; mi++) {
+                    try {
+                        dstMkr.setValueAtTime(
+                            comp.markerProperty.keyTime(mi),
+                            comp.markerProperty.keyValue(mi)
+                        );
+                    } catch (e) {}
+                }
+            }
+        } catch (eCM) {}
+
+        return newPrecomp;
+    }
+
     // ── Main ──────────────────────────────────────────────────────────────────
     var shotComps = collectShotComps();
     if (shotComps.length === 0) { alert("No *_comp compositions found in the project."); return; }
@@ -407,7 +494,17 @@ optional flat _grade/ folder for Resolve returns:
         for (var ci = 0; ci < shotComps.length; ci++) {
             var comp     = shotComps[ci];
             var shotName = shotNameFromComp(comp.name);
-            var plateLayer = findPlateLayer(comp, shotName);
+            // Ensure (or detect) the {shot}_plate precomp container. All
+            // layer operations below target this inner comp when it
+            // exists; effects on the OUTER layer in _comp are never
+            // touched. Dry-run runs in detect-only mode.
+            var platePrecomp = ensurePlatePrecomp(comp, shotName, dryRun);
+            var importTarget = platePrecomp || comp;
+            if (dryRun && !platePrecomp && findPlateLayer(comp, shotName)) {
+                dryRunLog.push(shotName + " [precomp]: would create "
+                    + plateCompNameFor(comp.name));
+            }
+            var plateLayer = findPlateLayer(importTarget, shotName);
             var shotBin    = getChildBin(binShots, shotName);
             var addedAny   = false;
             var foundAnyCategoryFiles = false;
@@ -445,12 +542,12 @@ optional flat _grade/ folder for Resolve returns:
                 //     found (defensive — shouldn't happen in practice).
                 //   - grades:  anchor = topmost existing render-or-grade,
                 //     or topmost plate-like if none exists yet.
-                var plateLikeTop = findTopmostPlateLike(comp) || plateLayer;
+                var plateLikeTop = findTopmostPlateLike(importTarget) || plateLayer;
                 var stackAnchor = null;
                 if (category === "render") {
                     stackAnchor = plateLikeTop;
                 } else {
-                    stackAnchor = findTopmostRenderOrGrade(comp) || plateLikeTop;
+                    stackAnchor = findTopmostRenderOrGrade(importTarget) || plateLikeTop;
                 }
 
                 for (var fi = 0; fi < catFiles.length; fi++) {
@@ -458,7 +555,7 @@ optional flat _grade/ folder for Resolve returns:
                     var fsPath  = catFile.fsName;
                     var footageItem = importedFiles[fsPath] || null;
 
-                    if (footageItem && isFootageInComp(comp, footageItem)) {
+                    if (footageItem && isFootageInComp(importTarget, footageItem)) {
                         statsSkipped++;
                         continue;
                     }
@@ -486,14 +583,16 @@ optional flat _grade/ folder for Resolve returns:
                     }
 
                     try {
-                        var newLayer = comp.layers.add(footageItem);
+                        var newLayer = importTarget.layers.add(footageItem);
                         // Alignment strategy:
-                        //   Anchor to the comp's own "cut in" / "cut out"
-                        //   markers (which shot_roundtrip writes onto every
-                        //   shotComp) — these are the authoritative cut
-                        //   boundaries and are independent of whether the
-                        //   plate has been trimmed to cut or is still showing
-                        //   full handles. Falls back to plate-layer markers,
+                        //   Anchor to the container's "cut in" / "cut out"
+                        //   markers (ensurePlatePrecomp copies them from
+                        //   the outer shotComp onto the new precomp, and
+                        //   shot_roundtrip writes them onto every shotComp)
+                        //   — these are the authoritative cut boundaries
+                        //   and are independent of whether the plate has
+                        //   been trimmed to cut or is still showing full
+                        //   handles. Falls back to plate-layer markers,
                         //   then plate inPoint/outPoint, then comp time 0.
                         //
                         //   Duration-driven branch:
@@ -505,12 +604,12 @@ optional flat _grade/ folder for Resolve returns:
                         //     - unknown duration → frame 0 → cut_in (safe).
                         var cutInCT = null, cutOutCT = null;
                         try {
-                            if (comp.markerProperty && comp.markerProperty.numKeys > 0) {
-                                for (var mkI = 1; mkI <= comp.markerProperty.numKeys; mkI++) {
-                                    var mkV = comp.markerProperty.keyValue(mkI);
+                            if (importTarget.markerProperty && importTarget.markerProperty.numKeys > 0) {
+                                for (var mkI = 1; mkI <= importTarget.markerProperty.numKeys; mkI++) {
+                                    var mkV = importTarget.markerProperty.keyValue(mkI);
                                     var mkCmt = (mkV && mkV.comment) ? String(mkV.comment).toLowerCase() : "";
-                                    if (mkCmt === "cut in")  cutInCT  = comp.markerProperty.keyTime(mkI);
-                                    if (mkCmt === "cut out") cutOutCT = comp.markerProperty.keyTime(mkI);
+                                    if (mkCmt === "cut in")  cutInCT  = importTarget.markerProperty.keyTime(mkI);
+                                    if (mkCmt === "cut out") cutOutCT = importTarget.markerProperty.keyTime(mkI);
                                 }
                             }
                         } catch (eCM) {}
@@ -533,7 +632,7 @@ optional flat _grade/ folder for Resolve returns:
                             cutOutCT = plateLayer.outPoint;
                         }
 
-                        var alignTolerance = 0.5 / comp.frameRate;
+                        var alignTolerance = 0.5 / importTarget.frameRate;
                         var newSrcDur = 0;
                         try { newSrcDur = footageItem.duration; } catch (eND) {}
 
@@ -558,7 +657,7 @@ optional flat _grade/ folder for Resolve returns:
                         } else {
                             newLayer.startTime = 0;
                         }
-                        newLayer.position.setValue([comp.width / 2, comp.height / 2]);
+                        newLayer.position.setValue([importTarget.width / 2, importTarget.height / 2]);
                         newLayer.label = (category === "grade") ? 11 : 14;
                         // Copy cut markers onto the new layer. Prefer the plate
                         // layer's own markers; fall back to the comp's
@@ -575,8 +674,8 @@ optional flat _grade/ folder for Resolve returns:
                         }
                         if (!srcMkr) {
                             try {
-                                if (comp.markerProperty && comp.markerProperty.numKeys > 0) {
-                                    srcMkr = comp.markerProperty;
+                                if (importTarget.markerProperty && importTarget.markerProperty.numKeys > 0) {
+                                    srcMkr = importTarget.markerProperty;
                                 }
                             } catch (eMkrCP) {}
                         }
@@ -615,7 +714,7 @@ optional flat _grade/ folder for Resolve returns:
             // Within each category, keep only the topmost (newest) layer enabled.
             var CATEGORY_SEGMENTS = { render: "render", grade: "_grade" };
             for (var ck = 0; ck < CATEGORIES.length; ck++) {
-                var catLayers = findLayersByPathSegment(comp, CATEGORY_SEGMENTS[CATEGORIES[ck]]);
+                var catLayers = findLayersByPathSegment(importTarget, CATEGORY_SEGMENTS[CATEGORIES[ck]]);
                 for (var li = 1; li < catLayers.length; li++) {
                     catLayers[li].enabled = false;
                     catLayers[li].audioEnabled = false;
@@ -627,7 +726,8 @@ optional flat _grade/ folder for Resolve returns:
             // import before hiding the source — see the README "Tools →
             // Import Renders & Grades" block for the reasoning.
 
-            // Keep GUIDE_BURNIN on top.
+            // Keep GUIDE_BURNIN on top. Lives on the outer shotComp; the
+            // inner _plate precomp has no burn-in, so look up on comp.
             var bl = comp.layers.byName("GUIDE_BURNIN");
             if (bl) { bl.locked = false; bl.moveToBeginning(); bl.locked = true; }
 
