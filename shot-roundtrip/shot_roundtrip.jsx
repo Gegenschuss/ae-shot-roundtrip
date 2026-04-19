@@ -1797,6 +1797,11 @@ NOTES
                 if (fullStart === 0 && (range.start - handleSec < 0)) cutStart = range.start;
                 var cutDuration = range.end - range.start;
                 if (cutStart + cutDuration > safeDuration) cutDuration = safeDuration - cutStart;
+                // Defensive: cutStart > safeDuration (clamped rawStart against a
+                // very short source) makes the line above negative, which then
+                // places the "cut out" marker BEFORE "cut in". Clamp to zero so
+                // the markers collapse to the same instant instead of crossing.
+                if (cutDuration < 0) cutDuration = 0;
 
                 shotComp.workAreaStart    = fullStart;
                 shotComp.workAreaDuration = fullDurationSec;
@@ -1804,7 +1809,7 @@ NOTES
                 shotComp.markerProperty.setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
 
                 var cutFrame = useNukeStart ? 1001 : 0;
-                if (true) addGuideBurnIn(shotComp, shotName, cutFrame, fullStart, actualLeadingHandles);
+                addGuideBurnIn(shotComp, shotName, cutFrame, fullStart, actualLeadingHandles);
                 addGuideBurnInMarkers(shotComp, cutStart, cutStart + cutDuration);
 
                 // ── Path-specific: precomp vs. direct footage ──────────────────

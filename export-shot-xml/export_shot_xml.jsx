@@ -294,7 +294,11 @@
     }
 
     function shotNameFromComp(compName) {
-        return compName.replace(/[_\s]comp$/i, "");
+        // Must mirror the leniency of collectCompItems() so "KM_010_comp"
+        // and "KM_010_comp_OS" both resolve to "KM_010" — otherwise the
+        // shot-prefix regex in pickFootageLayer silently fails to match
+        // any layer inside overscan variants.
+        return compName.replace(/[_\s]comp(_OS)?$/i, "");
     }
 
     /**
