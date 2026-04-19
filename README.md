@@ -29,21 +29,6 @@ All tools are accessible from a single dockable ScriptUI launcher panel.
 > (disk full, permissions, etc.) the roundtrip aborts before any
 > changes, so you can't lose work either way.
 
-> [!NOTE]
-> **Run this early in your AE production — before you pile on expressions,
-> stacked effects, rotoscoping, parenting, track mattes, or other layer
-> setups.** Shot Roundtrip wraps each selected layer into a container comp
-> and moves its attributes over. We try our best to preserve what was
-> there — transforms, keyframes, effects, masks, time remap, and file
-> bindings on effects like Apply Color LUT — but there are edges where
-> things won't survive perfectly: expressions that reference other layers
-> in the original comp, effects with a "Layer" dropdown (Displacement Map,
-> Set Matte, etc.), track mattes from neighbouring layers, Roto Brush /
-> Puppet / Content-Aware state, and layer parenting. Earlier in the edit
-> = less of that work is at risk. We're working to widen what survives,
-> but the safest time to run is right after the edit lands in AE, before
-> VFX work has been layered on top.
-
 At [Gegenschuss](https://gegenschuss.com) we work heavily with
 Adobe CC. Edits are cut in Premiere and move to After Effects once the edit
 is close to locked — AE is still the tool of choice for motion-graphic-heavy
@@ -222,25 +207,31 @@ work is underway. The pipeline is designed around this:
   project and imports finished returns from two sources:
 
   1. **VFX renders** — each shot's own `{shots}/{shot}/render/` folder.
-  2. **Resolve grades** — a flat `{shots}/_grades/` folder shared across
+  2. **Resolve grades** — a flat `{shots}/_grade/` folder shared across
      all shots, with files matched to comps by filename prefix
      (`KM_010_grade_v01.mov` → comp `KM_010_comp`).
 
   Layers stack in the comp:
 
   ```
-  Top → grade   (from _grades/, matched by filename prefix)
+  Top → grade   (from _grade/, matched by filename prefix)
         render  (from {shot}/render/)
-        plate   (disabled when anything sits above)
+        plate   (enabled state is never touched — you manage it)
   ```
 
   Within each category, the newest file wins (older versions are imported
   but disabled). The category order is fixed — a VFX re-render after a
   grade won't cover the grade, and a new grade always ends up on top.
-  Already-imported files are skipped. The `_grades/` folder is optional;
+  Already-imported files are skipped. The `_grade/` folder is optional;
   if it doesn't exist yet, only VFX renders are imported.
 
-  **Why `_grades/` is flat, not per-shot:** per-shot folders (`plate/`,
+  Plate enabled/disabled state is intentionally left alone so you can
+  verify the import is correct before hiding the source. Processed plate
+  variants (a stabilized or denoised `_plate` rendered alongside the
+  original) count as plates too — renders and grades stack above the
+  topmost plate-like layer, never between two plate variants.
+
+  **Why `_grade/` is flat, not per-shot:** per-shot folders (`plate/`,
   `render/`) travel with a shot when it's handed to another artist. Grades
   don't belong in that handoff, so they live in a separate flat archive
   at the shots root. Handed-off shot folders stay clean.
@@ -263,7 +254,7 @@ work is underway. The pipeline is designed around this:
   | Render | Individual clips |
   | Format | QuickTime (match your VFX render codec, e.g. ProRes 4444) |
   | Resolution | Same as source |
-  | File destination | `{project}/Roundtrip/_grades/` |
+  | File destination | `{project}/Roundtrip/_grade/` |
   | Filename uses | Custom |
   | Custom pattern | `%Source Name_grade_v01` |
 
@@ -416,8 +407,8 @@ Yes, for both plates and VFX returns. Point your Nuke / Deadline
 output at `{shots}/{shot}/render/` and make sure the filename starts
 with the shot name — the rest is automatic.
 
-**Do I need to create the `_grades/` folder myself?**
-No. Import Renders & Grades creates `Roundtrip/_grades/` the first
+**Do I need to create the `_grade/` folder myself?**
+No. Import Renders & Grades creates `Roundtrip/_grade/` the first
 time you run it, with a `README.txt` describing the Resolve Deliver
 preset and filename convention. No grades yet? Fine — only VFX
 renders get imported, everything else keeps working.

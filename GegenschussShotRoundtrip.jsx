@@ -36,7 +36,7 @@
         {
             group:  "Roundtrip",
             label:  "Import Renders & Grades",
-            tip:    "Scan all *_comp compositions for VFX renders (in each shot's render/ folder) and Resolve grades (in the flat _grades/ folder), and import them back into the project stacked grade > render > plate.",
+            tip:    "Scan all *_comp compositions for VFX renders (in each shot's render/ folder) and Resolve grades (in the flat _grade/ folder), and import them back into the project stacked grade > render > plate.",
             file:   "import-renders/import_renders.jsx"
         },
         {

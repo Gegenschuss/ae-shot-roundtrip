@@ -16,7 +16,7 @@ Single source of truth for the two README.txt files that the Roundtrip/
 tree scaffolds automatically:
 
   - Roundtrip/README.txt           (handoff tree overview, do-not-rename)
-  - Roundtrip/_grades/README.txt   (Resolve delivery preset, naming rules)
+  - Roundtrip/_grade/README.txt    (Resolve delivery preset, naming rules)
 
 Used by both shot-roundtrip/shot_roundtrip.jsx (primary creator) and
 import-renders/import_renders.jsx (safety net, in case the user runs
@@ -25,7 +25,7 @@ import before a full roundtrip).
 Exposes two globals after `$.evalFile`:
 
   writeRoundtripReadme(folder)   -> true if written, false if skipped
-  writeGradesReadme(folder)      -> true if written, false if skipped
+  writeGradeReadme(folder)       -> true if written, false if skipped
 
 Both are write-once: an existing README.txt is never overwritten.
 ================================================================================
@@ -55,7 +55,7 @@ function writeRoundtripReadme(folder) {
         "    {prefix}_020/\n" +
         "      plate/\n" +
         "      render/\n" +
-        "    _grades/            <- Resolve graded returns (flat, shared)\n" +
+        "    _grade/             <- Resolve graded returns (flat, shared)\n" +
         "    dynamicLink/        <- Dynamic Link wrapper comps\n" +
         "    {project}_Comp.nk   <- AppendClip master Nuke script (optional)\n" +
         "    {project}.xml       <- Premiere FCPXML (optional)\n" +
@@ -66,7 +66,7 @@ function writeRoundtripReadme(folder) {
         "\n" +
         "  AE comps  {prefix}_NNN_comp   <->   disk  {prefix}_NNN/\n" +
         "  VFX renders live in               {shot}/render/\n" +
-        "  Resolve grades live flat in       _grades/\n" +
+        "  Resolve grades live flat in       _grade/\n" +
         "  Grades match comps by filename prefix (KM_010_* -> KM_010_comp)\n" +
         "\n" +
         "Renaming any of these silently breaks the roundtrip. If a shot\n" +
@@ -84,7 +84,7 @@ function writeRoundtripReadme(folder) {
     return true;
 }
 
-function writeGradesReadme(folder) {
+function writeGradeReadme(folder) {
     if (!folder || !folder.exists) return false;
     var readme = new File(folder.fsName + "/README.txt");
     if (readme.exists) return false;
@@ -126,7 +126,7 @@ function writeGradesReadme(folder) {
         "\n" +
         "IMPORTANT - DO NOT RENAME this folder.\n" +
         "--------------------------------------\n" +
-        "The name \"_grades\" is hard-coded in the Import Renders &\n" +
+        "The name \"_grade\" is hard-coded in the Import Renders &\n" +
         "Grades script. Renaming it silently breaks grade import.\n" +
         "\n" +
         "Safe to delete the folder entirely if you don't use Resolve\n" +

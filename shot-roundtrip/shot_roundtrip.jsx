@@ -103,7 +103,7 @@ The AE project must be saved two levels inside the project root:
           plate/            ← rendered plate (.mov); re-imported into AE
           render/           ← VFX return goes here (for Nuke artist handoff)
           {shotName}.nk     ← per-shot Nuke script
-        _grades/            ← Resolve graded returns (flat, shared)
+        _grade/             ← Resolve graded returns (flat, shared)
         dynamicLink/        ← Dynamic Link wrapper comps
         {project}_Comp.nk   ← AppendClip .nk master (optional)
         {project}.xml       ← Premiere FCPXML (optional, overwritten each run)
@@ -209,17 +209,99 @@ NOTES
         var r6 = addRow(pnlOpt, "Shots Folder:");
         var etShotsFolder = r6.add("edittext", undefined, "../Roundtrip");
         etShotsFolder.preferredSize = [150, FIELD_H];
+        var btnBrowseShots = r6.add("button", undefined, "Browse\u2026");
+        btnBrowseShots.preferredSize = [80, FIELD_H];
+        btnBrowseShots.onClick = function () {
+            // Seed the picker with the current field's resolved path when it
+            // exists, so the user doesn't start from ~/ every time.
+            var seed = null;
+            try {
+                var txt = etShotsFolder.text || "";
+                var candidate = /^(\/|[A-Za-z]:)/.test(txt)
+                              ? new Folder(txt)
+                              : (proj.file ? new Folder(proj.file.parent.fsName + "/" + txt) : null);
+                if (candidate && candidate.exists) seed = candidate;
+            } catch (eSeed) {}
+            var picked = (seed ? seed : Folder.desktop).selectDlg("Select Shots Folder");
+            if (picked) etShotsFolder.text = picked.fsName;
+        };
 
         var chkSkipRender     = pnlOpt.add("checkbox", undefined, "Skip Render (debug)");           chkSkipRender.value     = false;
+
+        // ── Settings persistence ───────────────────────
+        // All fields except chkSkipRender (debug) round-trip through
+        // app.settings so the dialog remembers last-used values. Reset to
+        // Defaults populates the hardcoded defaults in-place; changes only
+        // persist when the user clicks Run Roundtrip.
+        var SR_SECTION  = "Gegenschuss Shot Roundtrip";
+        var SR_DEFAULTS = {
+            prefix:        "shot_",
+            startNum:      "010",
+            increment:     "10",
+            handles:       "50",
+            createNuke:    "true",
+            exportXML:     "true",
+            createDynLink: "true",
+            overscan:      "10",
+            omTemplate:    "ProRes 4444",
+            shotsFolder:   "../Roundtrip"
+        };
+        function srLoad(key, fallback) {
+            try {
+                if (app.settings.haveSetting(SR_SECTION, key)) return app.settings.getSetting(SR_SECTION, key);
+            } catch (e) {}
+            return fallback;
+        }
+        function srSave(key, value) {
+            try { app.settings.saveSetting(SR_SECTION, key, String(value)); } catch (e) {}
+        }
+        function srApply(s) {
+            etPrefix.text          = s.prefix;
+            etStartNum.text        = s.startNum;
+            etIncrement.text       = s.increment;
+            etHandles.text         = s.handles;
+            chkCreateNuke.value    = (s.createNuke    === "true" || s.createNuke    === true);
+            chkExportXML.value     = (s.exportXML     === "true" || s.exportXML     === true);
+            chkCreateDynLink.value = (s.createDynLink === "true" || s.createDynLink === true);
+            etOverscan.text        = s.overscan;
+            etOM.text              = s.omTemplate;
+            etShotsFolder.text     = s.shotsFolder;
+        }
+        srApply({
+            prefix:        srLoad("prefix",        SR_DEFAULTS.prefix),
+            startNum:      srLoad("startNum",      SR_DEFAULTS.startNum),
+            increment:     srLoad("increment",     SR_DEFAULTS.increment),
+            handles:       srLoad("handles",       SR_DEFAULTS.handles),
+            createNuke:    srLoad("createNuke",    SR_DEFAULTS.createNuke),
+            exportXML:     srLoad("exportXML",     SR_DEFAULTS.exportXML),
+            createDynLink: srLoad("createDynLink", SR_DEFAULTS.createDynLink),
+            overscan:      srLoad("overscan",      SR_DEFAULTS.overscan),
+            omTemplate:    srLoad("omTemplate",    SR_DEFAULTS.omTemplate),
+            shotsFolder:   srLoad("shotsFolder",   SR_DEFAULTS.shotsFolder)
+        });
 
         // ── Buttons ────────────────────────────────────
         var btnGrp = dlg.add("group");
         btnGrp.orientation = "row"; btnGrp.alignment = ["fill", "bottom"]; btnGrp.margins = [0, 4, 0, 0];
-        var btnCancel  = btnGrp.add("button", undefined, "Cancel");        btnCancel.preferredSize  = [80,  28];
-        var btnSpacer  = btnGrp.add("statictext", undefined, "");          btnSpacer.alignment      = ["fill", "center"];
-        var btnOk      = btnGrp.add("button", undefined, "Run Roundtrip"); btnOk.preferredSize      = [130, 28];
+        var btnReset   = btnGrp.add("button", undefined, "Reset to Defaults"); btnReset.preferredSize  = [130, 28];
+        var btnCancel  = btnGrp.add("button", undefined, "Cancel");            btnCancel.preferredSize = [80,  28];
+        var btnSpacer  = btnGrp.add("statictext", undefined, "");              btnSpacer.alignment     = ["fill", "center"];
+        var btnOk      = btnGrp.add("button", undefined, "Run Roundtrip");     btnOk.preferredSize     = [130, 28];
 
-        btnOk.onClick     = function() { dlg.close(1); };
+        btnReset.onClick  = function() { srApply(SR_DEFAULTS); };
+        btnOk.onClick     = function() {
+            srSave("prefix",        etPrefix.text);
+            srSave("startNum",      etStartNum.text);
+            srSave("increment",     etIncrement.text);
+            srSave("handles",       etHandles.text);
+            srSave("createNuke",    chkCreateNuke.value);
+            srSave("exportXML",     chkExportXML.value);
+            srSave("createDynLink", chkCreateDynLink.value);
+            srSave("overscan",      etOverscan.text);
+            srSave("omTemplate",    etOM.text);
+            srSave("shotsFolder",   etShotsFolder.text);
+            dlg.close(1);
+        };
         btnCancel.onClick = function() { dlg.close(2); };
 
         var dlgResult = dlg.show();
@@ -1436,12 +1518,19 @@ NOTES
         if (confResult !== 1) { progress.close(); return; }
 
         var aepFolder = proj.file.parent;
-        var fsShots = new Folder(aepFolder.fsName + "/" + etShotsFolder.text);
+        // Accept either an absolute path (e.g. picked via the Browse button)
+        // or a path relative to the .aep's parent folder (legacy default
+        // "../Roundtrip"). Absolute paths start with "/" on Unix or "D:" on
+        // Windows; everything else is joined against aepFolder.
+        var shotsPathText = etShotsFolder.text;
+        var fsShots = /^(\/|[A-Za-z]:)/.test(shotsPathText)
+                    ? new Folder(shotsPathText)
+                    : new Folder(aepFolder.fsName + "/" + shotsPathText);
         if (!fsShots.exists) fsShots.create();
         if (!fsShots.exists) { alert("Could not create shots folder:\n" + fsShots.fsName); progress.close(); return; }
         var fsScripts = fsShots;
 
-        // Scaffold the Roundtrip/ and _grades/ README.txt files so the
+        // Scaffold the Roundtrip/ and _grade/ README.txt files so the
         // handoff tree is self-documenting from day one. See
         // lib/write_readmes.jsx for the content. Both writes are non-fatal
         // (README is a nicety, not a requirement).
@@ -1449,9 +1538,9 @@ NOTES
             var readmeHelper = new File((new File($.fileName)).parent.parent.fsName + "/lib/write_readmes.jsx");
             if (readmeHelper.exists) $.evalFile(readmeHelper);
             if (typeof writeRoundtripReadme === "function") writeRoundtripReadme(fsShots);
-            var fsGrades = new Folder(fsShots.fsName + "/_grades");
+            var fsGrades = new Folder(fsShots.fsName + "/_grade");
             if (!fsGrades.exists) fsGrades.create();
-            if (typeof writeGradesReadme === "function") writeGradesReadme(fsGrades);
+            if (typeof writeGradeReadme === "function") writeGradeReadme(fsGrades);
         } catch (eRM) { /* non-fatal */ }
 
         var binShots      = getBinFolder("Shots");
@@ -1781,36 +1870,38 @@ NOTES
                         containerInner = containerComp.layer(1);
                     }
 
-                    // Shrink containerComp from mainComp.duration down to the
-                    // shot's own cut+handles length so opening the container
-                    // shows a clean 0-based timeline instead of a huge amount
-                    // of pre/post dead space.
+                    // Container duration = shotComp duration (= source length +
+                    // 1 buffer frame), so the inner _comp layer can be shown at
+                    // its FULL intrinsic length inside the container, not
+                    // trimmed to the cut+handles range. Container time aligns
+                    // 1:1 with shotComp time (= source time), which also makes
+                    // cut markers sit at the source-time cutStart/cutEnd — same
+                    // positions as the plateInner markers inside shotComp.
+                    var shotCompDurSec = shotComp.duration;
                     try {
-                        containerComp.duration = fullDurationSec;
+                        containerComp.duration = shotCompDurSec;
                         containerComp.displayStartTime = 0;
                     } catch(eDur) {}
 
                     if (containerInner) {
                         containerInner.replaceSource(shotComp, false);
-                        // Shift containerInner so the first rendered frame sits
-                        // at container time 0 (edit-friendly). shotComp's rendered
-                        // content lives at shotComp-time fullStart..fullEnd;
-                        // startTime = -fullStart makes container time 0 line up
-                        // with that first rendered frame.
-                        containerInner.startTime = -fullStart;
+                        // startTime=0 lines container time up with shotComp
+                        // (= source) time. inPoint/outPoint cover the full
+                        // source span so the layer shows no trim handles in
+                        // the container's timeline.
+                        containerInner.startTime = 0;
                         containerInner.inPoint   = 0;
-                        containerInner.outPoint  = fullDurationSec;
-                        // Markers now in container-local time: cut_in at handleSec,
-                        // cut_out at handleSec + cutDuration. Same for
-                        // containerInner (layer-level). plateInner markers stay at
-                        // source-time cutStart/cutEnd because shotComp's internal
-                        // timeline IS source time.
-                        containerComp.markerProperty.setValueAtTime(handleSec,               cutMarker("cut in"));
-                        containerComp.markerProperty.setValueAtTime(handleSec + cutDuration, cutMarker("cut out"));
+                        containerInner.outPoint  = shotCompDurSec;
+                        // Markers in source/container time: cut_in at cutStart,
+                        // cut_out at cutStart + cutDuration. containerComp,
+                        // plateInner (inside shotComp), and containerInner all
+                        // share the same time axis now.
+                        containerComp.markerProperty.setValueAtTime(cutStart,               cutMarker("cut in"));
+                        containerComp.markerProperty.setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
                         plateInner.property("Marker").setValueAtTime(cutStart,               cutMarker("cut in"));
                         plateInner.property("Marker").setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
-                        containerInner.property("Marker").setValueAtTime(handleSec,               cutMarker("cut in"));
-                        containerInner.property("Marker").setValueAtTime(handleSec + cutDuration, cutMarker("cut out"));
+                        containerInner.property("Marker").setValueAtTime(cutStart,               cutMarker("cut in"));
+                        containerInner.property("Marker").setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
                         var blDirect = shotComp.layers.byName("GUIDE_BURNIN");
                         if (blDirect) { blDirect.locked = false; blDirect.moveToBeginning(); blDirect.locked = true; }
 
@@ -1844,14 +1935,15 @@ NOTES
                         }
                     }
 
-                    // Align the mainComp precomp layer with the now-shifted
-                    // container timeline. Container time 0 = first rendered handle
-                    // frame; we want that to appear at mainComp time
-                    // (origInPoint - handleSec) so the cut still lands exactly at
-                    // origInPoint..origOutPoint (the editorial cut placement).
+                    // Align the mainComp precomp layer with the source-aligned
+                    // container timeline. Container time equals source time, so
+                    // we want mainComp time origInPoint (cut_in) to show
+                    // container time cutStart. precomp_layer.startTime = (origInPoint - cutStart).
+                    // Edit placement (inPoint..outPoint) is preserved exactly
+                    // at origInPoint..origOutPoint.
                     if (layer) {
                         try {
-                            layer.startTime = origInPoint - handleSec;
+                            layer.startTime = origInPoint - cutStart;
                             layer.inPoint   = origInPoint;
                             layer.outPoint  = origOutPoint;
                         } catch (eTiming) {}
@@ -1964,12 +2056,28 @@ NOTES
                 }
                 if (readyToImport) {
                     var imp = proj.importFile(new ImportOptions(ri.p));
-                    imp.parentFolder = ri.bin;
+                    // Keep the rendered plate in a dedicated plate/ sub-bin
+                    // (mirrors the on-disk layout) so the shot bin's root
+                    // stays clean — just comps + live footage, with all
+                    // outputs (plate, render, grade) in their own sub-bins.
+                    imp.parentFolder = getShotBin(ri.bin, "plate");
                     imp.label = 9; // Green — VFX return mov
                     var tComp = ri.c;
                     if(tComp instanceof CompItem) {
                         var nL = tComp.layers.add(imp);
-                        nL.startTime = ri.s;
+                        // Shift the imported plate one mainComp frame earlier
+                        // to compensate for the render-queue epsilon pushing
+                        // the first rendered frame past a frame boundary.
+                        // Empirically this is a constant 1 mainComp frame,
+                        // regardless of the footage's native frame rate — an
+                        // earlier fps-scaled formula overcompensated for cases
+                        // where sourceFPS > compFPS (e.g. 50p footage in a
+                        // 25p comp would land at the correct position plus
+                        // the extra scaling, throwing it off).
+                        var plateOffsetSec = (mainComp.frameRate > 0)
+                                           ? (1 / mainComp.frameRate)
+                                           : 0;
+                        nL.startTime = ri.s - plateOffsetSec;
                         nL.position.setValue([ri.w/2, ri.h/2]);
                         nL.label = 11;
                         nL.property("Marker").setValueAtTime(ri.cs, cutMarker("cut in"));

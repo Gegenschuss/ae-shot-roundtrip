@@ -260,19 +260,19 @@
             if (item instanceof FolderItem) {
                 collectCompItems(item, result);
             } else if (item instanceof CompItem) {
-                if (/[_\s]comp$/i.test(item.name)) result.push(item);
+                if (/[_\s]comp(_OS)?$/i.test(item.name)) result.push(item);
             }
         }
     }
 
-    // Finds a folder named "shots" (case-insensitive) anywhere in the project,
-    // not just at root. The main shot_roundtrip.jsx uses proj.items (flat
-    // scan), so if a pre-existing Shots folder lived nested (e.g. under DATA/),
-    // it got adopted and written into. We need the same reach here or the
-    // XML export can't locate its own output bin.
+    // Finds the "Shots" folder at project ROOT only. Projects sometimes
+    // contain additional folders named "Shots" nested elsewhere (per-shot
+    // subfolders, leftovers from other workflows, etc.) — those are ignored
+    // here so the XML export only looks at the authoritative root-level bin
+    // that the roundtrip creates via proj.items.addFolder().
     function findShotsFolder(root) {
-        for (var i = 1; i <= app.project.numItems; i++) {
-            var item = app.project.item(i);
+        for (var i = 1; i <= root.numItems; i++) {
+            var item = root.item(i);
             if (item instanceof FolderItem && item.name.toLowerCase() === "shots") {
                 return item;
             }
@@ -308,6 +308,15 @@
 
     var proj = app.project;
     if (!proj) { alert("No project open."); return; }
+
+    // Project base name used for the sequence name inside the XML and the
+    // generated output filename. Strip the .aep extension. Fall back to
+    // "Shot Export" only if the project is still untitled.
+    var projectBaseName = (proj.file && proj.file.displayName)
+                        ? proj.file.displayName.replace(/\.aep$/i, "")
+                        : "Shot Export";
+    // Sanitise for use in a filename: strip characters that filesystems hate.
+    var projectFileStem = projectBaseName.replace(/[\/\\:*?"<>|]/g, "_");
 
     var shotsFolder = findShotsFolder(proj.rootFolder);
     if (!shotsFolder) {
@@ -426,7 +435,7 @@
     L.push('\t<sequence id="sequence-1">');
     L.push('\t\t<duration>' + totalSeqF + '</duration>');
     L.push(rateBlock(seqFps, "\t\t"));
-    L.push('\t\t<name>Shot Export</name>');
+    L.push('\t\t<name>' + xmlEscape(projectBaseName) + '</name>');
 
     // ── sequence timecode ──────────────────────────────────────────────
     L.push('\t\t<timecode>');
@@ -585,11 +594,11 @@
         // Called from roundtrip — save automatically into the shots folder
         var xmlDir = new Folder($.global.__shotRoundtripXMLDir);
         if (!xmlDir.exists) xmlDir.create();
-        saveFile = new File(xmlDir.fsName + "/shot_export_" + dateStr + ".xml");
+        saveFile = new File(xmlDir.fsName + "/" + projectFileStem + "_shots_" + dateStr + ".xml");
     } else {
         // Standalone — show Save dialog
         var saveDir = proj.file ? proj.file.parent : Folder.desktop;
-        saveFile = new File(saveDir.fsName + "/shot_export_" + dateStr + ".xml");
+        saveFile = new File(saveDir.fsName + "/" + projectFileStem + "_shots_" + dateStr + ".xml");
         saveFile = saveFile.saveDlg("Save XML for DaVinci Resolve", "XML files:*.xml,All files:*.*");
         if (!saveFile) return;
     }
