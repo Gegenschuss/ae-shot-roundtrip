@@ -243,6 +243,9 @@ work is underway. The pipeline is designed around this:
   with the shot numbers that reference it and a per-row dropdown to
   pick how the roundtrip should handle that source:
 
+  <img src="docs/shared_source.png" width="720" alt="Shared source footage detected — per-source mode picker">
+
+
   - **Separate** — chain is duplicated per reference; each becomes
     its own shot with its own plate, shotComp, and disk folder. Pick
     this when you want to grade / VFX the same clip differently per
