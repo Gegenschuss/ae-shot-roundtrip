@@ -178,6 +178,13 @@ NOTES
         var r2 = addRow(pnlMain, "Start Number:");
         var etStartNum = r2.add("edittext", undefined, "010");
         etStartNum.preferredSize = [60, FIELD_H];
+        var chkAutoStart = r2.add("checkbox", undefined, "Auto");
+        chkAutoStart.helpTip = "Auto-pick shot numbers from the selected layers' positions in the main comp. "
+                             + "Sandwiches new shots between existing ones (e.g. shot_035 between _030 and _040).";
+        function applyAutoStartUI() {
+            etStartNum.enabled = !chkAutoStart.value;
+        }
+        chkAutoStart.onClick = applyAutoStartUI;
 
         var r2b = addRow(pnlMain, "Increment:");
         var etIncrement = r2b.add("edittext", undefined, "10");
@@ -237,6 +244,7 @@ NOTES
         var SR_DEFAULTS = {
             prefix:        "shot_",
             startNum:      "010",
+            autoStart:     "true",
             increment:     "10",
             handles:       "50",
             createNuke:    "true",
@@ -258,6 +266,7 @@ NOTES
         function srApply(s) {
             etPrefix.text          = s.prefix;
             etStartNum.text        = s.startNum;
+            chkAutoStart.value     = (s.autoStart    === "true" || s.autoStart    === true);
             etIncrement.text       = s.increment;
             etHandles.text         = s.handles;
             chkCreateNuke.value    = (s.createNuke    === "true" || s.createNuke    === true);
@@ -266,10 +275,12 @@ NOTES
             etOverscan.text        = s.overscan;
             etOM.text              = s.omTemplate;
             etShotsFolder.text     = s.shotsFolder;
+            applyAutoStartUI();
         }
         srApply({
             prefix:        srLoad("prefix",        SR_DEFAULTS.prefix),
             startNum:      srLoad("startNum",      SR_DEFAULTS.startNum),
+            autoStart:     srLoad("autoStart",     SR_DEFAULTS.autoStart),
             increment:     srLoad("increment",     SR_DEFAULTS.increment),
             handles:       srLoad("handles",       SR_DEFAULTS.handles),
             createNuke:    srLoad("createNuke",    SR_DEFAULTS.createNuke),
@@ -292,6 +303,7 @@ NOTES
         btnOk.onClick     = function() {
             srSave("prefix",        etPrefix.text);
             srSave("startNum",      etStartNum.text);
+            srSave("autoStart",     chkAutoStart.value);
             srSave("increment",     etIncrement.text);
             srSave("handles",       etHandles.text);
             srSave("createNuke",    chkCreateNuke.value);
@@ -395,7 +407,9 @@ NOTES
             } else {
                 lines.push("");
                 if (typeof versionedFile !== "undefined" && versionedFile) {
-                    lines.push("Working file: " + versionedFile.name);
+                    // displayName is URI-decoded (spaces stay spaces);
+                    // .name returns percent-encoded ("My%20Project.aep").
+                    lines.push("Working file: " + versionedFile.displayName);
                     lines.push("(original preserved on disk as the rollback point)");
                     lines.push("");
                 }
@@ -408,7 +422,25 @@ NOTES
                 lines.push("", "Use Cmd/Ctrl+Z to undo the session's work, or reopen the original .aep from disk.");
             }
             try { progress.close(); } catch (e) {}
-            alert(lines.join("\n"));
+
+            // ScriptUI window (grey in AE) instead of alert() — matches the
+            // Roundtrip Complete summary's look and sidesteps the macOS
+            // system-alert styling that the Ae app icon gets slapped onto.
+            var w = new Window("dialog", "Gegenschuss \u00b7 Roundtrip Cancelled");
+            w.orientation = "column"; w.alignChildren = ["fill", "top"];
+            w.spacing = 10; w.margins = 14;
+            var body = lines.join("\n");
+            var bodyLines = body.split("\n").length;
+            var maxH = 600;
+            try { maxH = $.screens[0].bottom - $.screens[0].top - 200; } catch (eS) {}
+            var textH = Math.min(bodyLines * 18 + 10, maxH);
+            var txt = w.add("edittext", undefined, body,
+                { multiline: true, readonly: true, scrollable: true });
+            txt.preferredSize = [480, textH];
+            var btnRow = w.add("group"); btnRow.alignment = ["right", "bottom"];
+            var ok = btnRow.add("button", undefined, "OK");
+            ok.onClick = function () { w.close(); };
+            w.show();
         }
 
         // Cancel-check helper. Call at the top of each long loop iteration:
@@ -670,11 +702,23 @@ NOTES
 
         // Recursively searches comp for ALL footage layers anywhere in the hierarchy.
         // No time filtering — finds every footage file regardless of which frames are
-        // currently visible. Returns an array of { footageLayer, footageComp }.
-        // The source time range for each layer is calculated separately via
-        // getRequiredSourceRange(), which reads the layer's own in/out and time remap.
-        function findAllFootageInPrecomp(comp, path) {
-            var currentPath = (path || []).concat([comp.name]);
+        // currently visible. Returns { footageLayer, footageComp, breadcrumb, layerChain }.
+        //
+        // layerChain holds the precomp LAYERS encountered between the caller's starting
+        // comp and the footage's immediate parent, outer-to-inner. Used by the expansion
+        // step to walk the outer selection's in/out through every nested stretch + time
+        // remap via mapTimeToSource — so the render range reflects what's actually visible
+        // in mainComp, not the footage layer's untrimmed extent.
+        //
+        //   mainComp(selected precomp A)
+        //     └─ precomp A
+        //         └─ B_layer → precomp B        ← layerChain = [B_layer]
+        //             └─ footage.mov            ← footageLayer, footageComp = B
+        //
+        // For footage directly inside the selected precomp, layerChain is empty.
+        function findAllFootageInPrecomp(comp, path, layerChain) {
+            var currentPath  = (path       || []).concat([comp.name]);
+            var currentChain =  layerChain || [];
             var results = [];
             for (var li = 1; li <= comp.numLayers; li++) {
                 var l = comp.layer(li);
@@ -684,10 +728,16 @@ NOTES
                 var isFile = false;
                 try { if (l.source.mainSource && l.source.mainSource.file) isFile = true; } catch(e) {}
                 if (isFile) {
-                    results.push({ footageLayer: l, footageComp: comp, breadcrumb: currentPath });
+                    results.push({
+                        footageLayer: l,
+                        footageComp:  comp,
+                        breadcrumb:   currentPath,
+                        layerChain:   currentChain.slice()  // snapshot so siblings don't share
+                    });
                 } else if (l.source instanceof CompItem) {
-                    // Sub-precomp: recurse and collect all footage inside
-                    var sub = findAllFootageInPrecomp(l.source, currentPath);
+                    // Sub-precomp: recurse and extend the chain with THIS precomp layer,
+                    // since future time mappings have to travel through it.
+                    var sub = findAllFootageInPrecomp(l.source, currentPath, currentChain.concat([l]));
                     for (var si = 0; si < sub.length; si++) results.push(sub[si]);
                 }
             }
@@ -914,12 +964,91 @@ NOTES
 
         var shotPrefix = etPrefix.text;
         var startNum = parseInt(etStartNum.text, 10);
+        var autoStartMode = !!chkAutoStart.value;
         var handleFrames = parseInt(etHandles.text, 10);
         var overscanPercent = parseFloat(etOverscan.text); if(isNaN(overscanPercent)) overscanPercent=0;
         var omTemplate = etOM.text;
         var useNukeStart = true;
         var increment = parseInt(etIncrement.text, 10);
         if (isNaN(increment) || increment < 1) increment = 10;
+
+        // Auto-numbering: scan mainComp for existing shot layers (named
+        // {prefix}NNN_comp, {prefix}NNN_container, or range-bin
+        // {prefix}NNN_MMM_container) and assemble their (number, time)
+        // positions + a taken-numbers map. Used by pickAutoShotNumber()
+        // below to sandwich each new shot between its time-neighbours.
+        var autoExisting = [];  // [{num, time}, …] sorted by time
+        var autoTaken    = {};  // {num: true} for collision avoidance
+        if (autoStartMode) {
+            var aPrefEsc = shotPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            // Project-wide: any {prefix}NNN_comp or {prefix}NNN_container marks NNN as taken.
+            var aCompRe      = new RegExp("^" + aPrefEsc + "(\\d+)_(?:comp|container)(?:_OS)?$", "i");
+            var aRangeRe     = new RegExp("^" + aPrefEsc + "(\\d+)_(\\d+)_container(?:_OS)?$", "i");
+            for (var aPi = 1; aPi <= proj.numItems; aPi++) {
+                var aIt = proj.item(aPi);
+                if (!(aIt instanceof CompItem)) continue;
+                var aM = aIt.name.match(aCompRe);
+                if (aM) { autoTaken[parseInt(aM[1], 10)] = true; continue; }
+                var aR = aIt.name.match(aRangeRe);
+                if (aR) {
+                    // Range container spans [first, last] — mark every integer
+                    // in the range as taken so sandwich picks can't collide
+                    // with a middle number (e.g. shot_010_030_container
+                    // implies 020 also exists).
+                    var aRF = parseInt(aR[1], 10);
+                    var aRL = parseInt(aR[2], 10);
+                    for (var aRx = Math.min(aRF, aRL); aRx <= Math.max(aRF, aRL); aRx++) {
+                        autoTaken[aRx] = true;
+                    }
+                }
+            }
+            // mainComp layers: record (num, inPoint) for time-order sandwich detection.
+            var aTimeRe = new RegExp("^" + aPrefEsc + "(\\d+)(?:_(\\d+))?_(?:comp|container)(?:_OS)?$", "i");
+            for (var aLi = 1; aLi <= mainComp.numLayers; aLi++) {
+                var aL = mainComp.layer(aLi);
+                var aNm = null;
+                try { if (aL.source instanceof CompItem) aNm = aL.source.name; } catch(eAN) {}
+                if (!aNm) continue;
+                var aTM = aNm.match(aTimeRe);
+                if (!aTM) continue;
+                var aT = 0;
+                try { aT = aL.inPoint; } catch(eAT) {}
+                autoExisting.push({ num: parseInt(aTM[1], 10), time: aT });
+                if (aTM[2]) autoExisting.push({ num: parseInt(aTM[2], 10), time: aT });
+            }
+            // Stable order at tied times: secondary key = num ascending.
+            // ExtendScript's Array.sort is NOT guaranteed stable, so ties
+            // (like range-container's first+last entries sharing one
+            // layer's inPoint) can reorder unpredictably. The time-ordered
+            // scan picks the LAST entry with time <= t as `before`, so a
+            // reorder between {num:10} and {num:30} at the same time would
+            // flip `before` from 30 to 10 and produce a wrong midpoint.
+            autoExisting.sort(function(a, b) {
+                if (a.time !== b.time) return a.time - b.time;
+                return a.num - b.num;
+            });
+        }
+
+        // Pick a shot number for a layer at mainComp time t. Neighbour-
+        // aware: sandwiches between the existing before/after shot numbers,
+        // so inserting a new layer between shot_030 and shot_040 gives
+        // shot_035. Collisions (midpoint already taken) are resolved by
+        // bumping upward to the next free number.
+        function pickAutoShotNumber(t) {
+            var before = null, after = null;
+            for (var i = 0; i < autoExisting.length; i++) {
+                if (autoExisting[i].time <= t) before = autoExisting[i];
+                else { after = autoExisting[i]; break; }
+            }
+            var pick;
+            if (!before && !after)      pick = increment;
+            else if (!before)           pick = Math.max(1, after.num - increment);
+            else if (!after)            pick = before.num + increment;
+            else                        pick = Math.floor((before.num + after.num) / 2);
+            while (autoTaken[pick] && pick < 100000) pick++;
+            autoTaken[pick] = true;
+            return pick;
+        }
 
         var selLayers = [];
         var skippedLayers = [];
@@ -1222,36 +1351,59 @@ NOTES
                     } else {
                         for (var ef = 0; ef < eFounds.length; ef++) {
                             var eF = eFounds[ef];
-                            // Derive the source range from the precomp layer's cut bounds in mainComp
-                            // (not the footage layer's own in/out, which is often the full untrimmed duration).
-                            // For footage directly inside the precomp we do a two-step mapping:
-                            //   mainComp cut → precomp time (via the precomp layer's stretch/remap)
-                            //   precomp time → source time   (via the footage layer's stretch/remap)
-                            // For deeper nesting we fall back to the footage layer's own in/out.
-                            var eRange;
-                            if (eF.footageComp === eItem.layer.source) {
-                                var pcIn  = mapTimeToSource(eItem.layer, eItem.layer.inPoint);
-                                var pcOut = mapTimeToSource(eItem.layer, eItem.layer.outPoint);
-                                var rA = mapTimeToSource(eF.footageLayer, pcIn);
-                                var rB = mapTimeToSource(eF.footageLayer, pcOut);
-                                eRange = { start: rA, end: rB };
-                            } else {
-                                eRange = getRequiredSourceRange(eF.footageLayer);
+                            // Per-footage source range = intersection of two signals:
+                            //
+                            //   1. CHAIN-DERIVED range: walk the outer's visible in/out
+                            //      down through every precomp layer + the footage layer
+                            //      via mapTimeToSource. Produces the source time span
+                            //      the edit COULD show for this footage — but because
+                            //      mapTimeToSource only applies stretch + time-remap
+                            //      (not inPoint/outPoint trim), it extrapolates past
+                            //      the footage layer's own cut. In a multi-footage
+                            //      precomp this ends up as the full outer span (e.g.
+                            //      C2454 trimmed 0-10 in a 0-110 precomp still returns
+                            //      0-110 source).
+                            //
+                            //   2. OWN range: getRequiredSourceRange reads the footage
+                            //      layer's own inPoint/outPoint — the cut region it
+                            //      actually occupies inside its parent precomp.
+                            //
+                            // Intersecting gives the minimal source range that is both
+                            // VISIBLE from mainComp AND WITHIN this layer's own cut.
+                            // Covers the user's original ask (2-sec cut of 2-min clip
+                            // buried N precomps deep → render 2 seconds) without
+                            // breaking multi-footage precomps (each footage layer only
+                            // renders its own trimmed cut).
+                            var rA = mapTimeToSource(eItem.layer, eItem.layer.inPoint);
+                            var rB = mapTimeToSource(eItem.layer, eItem.layer.outPoint);
+                            for (var lcI = 0; lcI < eF.layerChain.length; lcI++) {
+                                rA = mapTimeToSource(eF.layerChain[lcI], rA);
+                                rB = mapTimeToSource(eF.layerChain[lcI], rB);
                             }
-                            // Normalize so start <= end. A reversed time remap (decreasing
-                            // values from in to out) or a nested reversal produces an inverted
-                            // range here; downstream math — plate duration, handle expansion,
-                            // marker placement — all assume forward order. Reversal direction
-                            // is tracked separately via scanLayerTimeEffect/reversedList, so
-                            // losing the ordering here is safe.
-                            if (eRange.start > eRange.end) {
-                                var eRtmp = eRange.start; eRange.start = eRange.end; eRange.end = eRtmp;
+                            rA = mapTimeToSource(eF.footageLayer, rA);
+                            rB = mapTimeToSource(eF.footageLayer, rB);
+                            var outerMin = Math.min(rA, rB);
+                            var outerMax = Math.max(rA, rB);
+                            var ownRange = getRequiredSourceRange(eF.footageLayer);
+                            var eRange = {
+                                start: Math.max(ownRange.start, outerMin),
+                                end:   Math.min(ownRange.end,   outerMax)
+                            };
+                            // Fallback if intersection is empty (footage isn't truly
+                            // visible from the outer range, but findAllFootageInPrecomp
+                            // still surfaced it — e.g. it sits entirely before/after
+                            // the outer's trim window). Render its own range instead
+                            // of creating a zero-duration shot.
+                            if (eRange.start >= eRange.end) {
+                                eRange.start = ownRange.start;
+                                eRange.end   = ownRange.end;
                             }
                             out.push({
                                 layer: eItem.layer, mainLayerIdx: eItem.layer.index, isPrecomp: true, totalInPrecomp: eFounds.length,
                                 found: { footageLayer: eF.footageLayer, footageComp: eF.footageComp,
                                          rangeStart: eRange.start, rangeEnd: eRange.end,
-                                         breadcrumb: eF.breadcrumb || [] },
+                                         breadcrumb: eF.breadcrumb || [],
+                                         layerChain: eF.layerChain || [] },
                                 // Snapshot the original footage source id NOW. The processing loop
                                 // later calls replaceSource on this footageLayer — after that,
                                 // reading footageLayer.source.id returns the shotComp id, so dedup
@@ -1363,6 +1515,48 @@ NOTES
         var expandedLayers = buildExpandedLayers(selLayers, skippedLayers, 11, 5, true);
         if (expandedLayers === null) return;
 
+        // If auto-numbering is on, assign a number per expandedLayers entry
+        // ONCE up front (shared between preview and main loop). Multi-footage
+        // precomps share a mainLayerIdx, so the first entry for that idx gets
+        // the time-based pick and sub-entries step forward by `increment`.
+        var autoShotNumbers = null;
+        if (autoStartMode) {
+            autoShotNumbers = [];
+            var autoBaseByMainIdx  = {};
+            var autoCountByMainIdx = {};
+            function autoRegisterAssigned(num, time) {
+                // Make every newly-assigned shot visible to later picks as a
+                // time-neighbour — otherwise selections after the first all
+                // see autoExisting=[] and pick `increment`, then cascade
+                // upward through collision-bumps (10, 11, 12, …) instead of
+                // spacing out by increment from their time-nearest predecessor.
+                autoExisting.push({ num: num, time: time });
+                autoExisting.sort(function(a, b) {
+                    if (a.time !== b.time) return a.time - b.time;
+                    return a.num - b.num;
+                });
+            }
+            for (var aEi = 0; aEi < expandedLayers.length; aEi++) {
+                var aEItem = expandedLayers[aEi];
+                var aMLidx = aEItem.mainLayerIdx;
+                var aLT = 0;
+                try { aLT = aEItem.layer.inPoint; } catch(eALT) {}
+                var aAssigned;
+                if (!(aMLidx in autoBaseByMainIdx)) {
+                    autoBaseByMainIdx[aMLidx]  = pickAutoShotNumber(aLT);
+                    autoCountByMainIdx[aMLidx] = 0;
+                    aAssigned = autoBaseByMainIdx[aMLidx];
+                } else {
+                    autoCountByMainIdx[aMLidx]++;
+                    aAssigned = autoBaseByMainIdx[aMLidx] + autoCountByMainIdx[aMLidx] * increment;
+                    while (autoTaken[aAssigned] && aAssigned < 100000) aAssigned++;
+                    autoTaken[aAssigned] = true;
+                }
+                autoRegisterAssigned(aAssigned, aLT);
+                autoShotNumbers.push(aAssigned);
+            }
+        }
+
         if (expandedLayers.length === 0) {
             var msg = "Keine gültigen Layer gefunden.";
             if (skippedLayers.length > 0) msg += "\n" + skippedLayers.length + " Layer wurden übersprungen.";
@@ -1399,7 +1593,7 @@ NOTES
             if (cancelCheck()) return;
             // Per-row update so a hang/crash surfaces the exact offending row.
             progress.update(null, "row " + (cfi + 1) + " of " + expandedLayers.length, 12 + (2 * cfi / Math.max(1, expandedLayers.length)));
-            var cfNum  = startNum + cfi * increment;
+            var cfNum  = autoShotNumbers ? autoShotNumbers[cfi] : (startNum + cfi * increment);
             var cfName = shotPrefix + pad(cfNum, 3);
             var cfItem = expandedLayers[cfi];
 
@@ -1448,14 +1642,14 @@ NOTES
                 cfPath = (cfItem.layer.source && cfItem.layer.source.name) || "(no source)";
             }
 
-            var cfFrames = cfCutFrames + "f";
+            var cfFrames = "" + cfCutFrames;
             var cfRes    = (cfSrcW > 0) ? (cfSrcW + "\u00d7" + cfSrcH) : "";
 
             // Notice column: fps mismatch + time-effect tags. Reversed effects are
             // already surfaced via the loud dialog at the top of the run; we repeat
             // them here per-shot so it's clear which shots the warning covered.
             var cfNoticeParts = [];
-            if (cfFpsMismatch) cfNoticeParts.push("!!! fps " + cfSrcFps + "\u2260" + cfFps);
+            if (cfFpsMismatch) cfNoticeParts.push("fps " + cfSrcFps + "\u2260" + cfFps);
             var cfEffects = scanSelLayerForEffects(cfItem.layer);
             for (var cfe = 0; cfe < cfEffects.length; cfe++) {
                 cfNoticeParts.push(cfEffects[cfe].label);
@@ -1500,12 +1694,12 @@ NOTES
 
         // Header info
         var confProjName = proj.file ? proj.file.displayName.replace(".aep", "") : "unsaved project";
-        var confInfoTxt = confProjName + "   \u2022   " + mainComp.name + "   \u2022   " + cfFps + " fps   \u2022   handles: " + handleFrames + "f";
+        var confInfoTxt = confProjName + "   \u2022   " + mainComp.name + "   \u2022   " + cfFps + " fps   \u2022   handles: " + handleFrames;
         if (overscanPercent > 0) confInfoTxt += "   \u2022   +" + overscanPercent + "% overscan (toggle per shot with \u2715)";
         confDlg.add("statictext", undefined, confInfoTxt);
 
         if (chkSkipRender.value) {
-            confDlg.add("statictext", undefined, "!!! SKIP RENDER IS ON \u2014 comps will be built but nothing will be rendered or imported");
+            confDlg.add("statictext", undefined, "SKIP RENDER IS ON \u2014 comps will be built but nothing will be rendered or imported");
         }
 
         confDlg.add("statictext", undefined, expandedLayers.length + " shot" + (expandedLayers.length !== 1 ? "s" : "") + " will be created:");
@@ -1530,7 +1724,7 @@ NOTES
         }
 
         // Footer + toggle button
-        var confFooterTxt = "Total: " + confTotalFrames + "f  (" + (Math.round(confTotalFrames / cfFps * 10) / 10) + "s)   handles: " + handleFrames + "f";
+        var confFooterTxt = "Total: " + confTotalFrames + "  (" + (Math.round(confTotalFrames / cfFps * 10) / 10) + "s)   handles: " + handleFrames;
         confDlg.add("statictext", undefined, confFooterTxt);
 
         var confBtnGrp = confDlg.add("group");
@@ -1674,6 +1868,7 @@ NOTES
             var processedSourceIds = {};
             var precompLayerRegistry    = {}; // mainLayerIdx → firstName (for multi-footage rename)
             var precompRangeBinRegistry = {}; // mainLayerIdx → FolderItem (per-range bin under /Shots)
+            var intermedCompRegistry    = {}; // intermediate comp id → {firstNum, lastNum, firstShotName} (nested-wrapper rename)
 
             // Pre-build set of existing comp names so the already-processed check is O(1)
             // rather than scanning all project items for every shot.
@@ -1687,7 +1882,7 @@ NOTES
                 var item      = expandedLayers[i];
                 var layer     = item.layer;
                 var isPrecomp = item.isPrecomp;
-                var currentNum = startNum + (i * increment);
+                var currentNum = autoShotNumbers ? autoShotNumbers[i] : (startNum + (i * increment));
                 var shotName   = shotPrefix + pad(currentNum, 3);
                 progress.update(
                     "Building shot comps\u2026",
@@ -1893,6 +2088,64 @@ NOTES
                         } catch(eRn2) {}
                     }
 
+                    // Intermediate precomp rename: every wrapper precomp BETWEEN
+                    // the outer selection's source and the raw footage would
+                    // otherwise keep its original auto-generated name
+                    // ("C2456.mov Comp 1") with no indication of which shot
+                    // lives there. Walk the chain from innermost to outermost
+                    // and rename each layer along the way.
+                    //
+                    // Naming convention (suffix reflects distance from the
+                    // footage, so names read intuitively top-down):
+                    //   depth 0 (immediate parent of footage): _inner
+                    //   depth 1 (one level up):                _inner2
+                    //   depth 2:                               _inner3
+                    //   …
+                    //
+                    // Registry is keyed per wrapper-comp id using the same
+                    // last-write-wins range pattern as the outer range bin:
+                    // if the same wrapper hosts multiple shots it ends up as
+                    // "shot_030_050_inner" rather than flip-flopping per shot.
+                    //
+                    // Never touches the outer container (it has its own naming
+                    // via precompLayerRegistry + the "_container" suffix).
+                    try {
+                        var iChain = (item.found && item.found.layerChain) ? item.found.layerChain : [];
+                        var iFComp = item.found && item.found.footageComp;
+                        if (iFComp && iFComp !== item.layer.source) {
+                            // Build wrapperComps innermost-to-outermost.
+                            // footageComp is the innermost wrapper (depth 0).
+                            // Chain is outer-to-inner, so its last entry's
+                            // source === footageComp; step back to grab the
+                            // outer wrappers.
+                            var wrapperComps = [iFComp];
+                            for (var wi = iChain.length - 2; wi >= 0; wi--) {
+                                try { wrapperComps.push(iChain[wi].source); } catch(eWS) {}
+                            }
+                            for (var wci = 0; wci < wrapperComps.length; wci++) {
+                                var wComp = wrapperComps[wci];
+                                if (!wComp) continue;
+                                var wcId;
+                                try { wcId = wComp.id; } catch(eWcId) { continue; }
+                                if (!intermedCompRegistry[wcId]) {
+                                    intermedCompRegistry[wcId] = {
+                                        firstNum:      currentNum,
+                                        firstShotName: shotName,
+                                        lastNum:       currentNum
+                                    };
+                                } else {
+                                    intermedCompRegistry[wcId].lastNum = currentNum;
+                                }
+                                var wReg = intermedCompRegistry[wcId];
+                                var suffix = (wci === 0) ? "_inner" : ("_inner" + (wci + 1));
+                                var icName = (wReg.firstNum === wReg.lastNum)
+                                           ? wReg.firstShotName + suffix
+                                           : wReg.firstShotName + "_" + pad(wReg.lastNum, 3) + suffix;
+                                try { wComp.name = icName + osSuffix; } catch(eIR) {}
+                            }
+                        }
+                    } catch(eIRB) {}
+
                     // No container comp. Mark source as processed, replace footage layer
                     // inside the deepest precomp with shotComp. All transforms/effects on
                     // footageLayer are preserved in place — nothing to transplant.
@@ -1925,35 +2178,27 @@ NOTES
                         } catch(eOsAP) {}
                     }
 
-                    // Trim the footageLayer (now showing shotComp) to the rendered plate range.
-                    // Also capture the cut/plate times in footageComp time — these are used below
-                    // to drive both the main-comp layer trim and the _dynamicLink comp, so that
-                    // untrimmed precomp layers (outPoint at comp end) don't produce wrong results.
-                    var flPlateStart = 0, flPlateEnd = 0, flCutIn = 0, flCutOut = 0;
+                    // Trim the footageLayer (now showing shotComp) to the EDITORIAL
+                    // CUT range, not the cut+handles plate range. Handles are kept
+                    // INSIDE the shotComp for external tools (Nuke, dynamicLink);
+                    // exposing them on the outer layer's timeline makes adjacent
+                    // shots overlap — the trailing handle of shot N covers the
+                    // leading frames of shot N+1 in the same precomp and the edit
+                    // stops reconstructing cleanly.
+                    var flCutIn = 0, flCutOut = 0;
                     try {
                         var flStretch = (footageLayer.stretch !== 0) ? footageLayer.stretch : 100;
                         if (footageLayer.timeRemapEnabled) {
                             // Source→comp mapping is nonlinear for time-remapped layers.
-                            // The footage layer's in/out are already correct cut bounds in comp time.
-                            // Estimate handle offsets using the local comp/source time ratio near the cut.
-                            var trCompDur = footageLayer.outPoint - footageLayer.inPoint;
-                            var trSrcDur  = (range.end > range.start) ? (range.end - range.start) : 1;
-                            // Guard both dividend and divisor — a zero-duration footage layer
-                            // (manually trimmed to a point) produces trCompDur === 0 which
-                            // cascades to negative/zero handle offsets below.
-                            var trRate    = (trCompDur > 0) ? (trCompDur / trSrcDur) : 1;
-                            flCutIn      = footageLayer.inPoint;
-                            flCutOut     = footageLayer.outPoint;
-                            flPlateStart = flCutIn  - handleSec * trRate;
-                            flPlateEnd   = flCutOut + handleSec * trRate;
+                            // The footage layer's in/out are already the cut bounds in comp time.
+                            flCutIn  = footageLayer.inPoint;
+                            flCutOut = footageLayer.outPoint;
                         } else {
-                            flPlateStart = footageLayer.startTime + fullStart * (flStretch / 100);
-                            flPlateEnd   = footageLayer.startTime + (fullStart + fullDurationSec) * (flStretch / 100);
-                            flCutIn      = footageLayer.startTime + cutStart * (flStretch / 100);
-                            flCutOut     = footageLayer.startTime + (cutStart + cutDuration) * (flStretch / 100);
+                            flCutIn  = footageLayer.startTime + cutStart * (flStretch / 100);
+                            flCutOut = footageLayer.startTime + (cutStart + cutDuration) * (flStretch / 100);
                         }
-                        footageLayer.inPoint  = flPlateStart;
-                        footageLayer.outPoint = flPlateEnd;
+                        footageLayer.inPoint  = flCutIn;
+                        footageLayer.outPoint = flCutOut;
                         footageLayer.property("Marker").setValueAtTime(flCutIn,  cutMarker("cut in"));
                         footageLayer.property("Marker").setValueAtTime(flCutOut, cutMarker("cut out"));
                     } catch(eTrim) {}
@@ -2255,19 +2500,18 @@ NOTES
                     var tComp = ri.c;
                     if(tComp instanceof CompItem) {
                         var nL = tComp.layers.add(imp);
-                        // Shift the imported plate one mainComp frame earlier
-                        // to compensate for the render-queue epsilon pushing
-                        // the first rendered frame past a frame boundary.
-                        // Empirically this is a constant 1 mainComp frame,
-                        // regardless of the footage's native frame rate — an
-                        // earlier fps-scaled formula overcompensated for cases
-                        // where sourceFPS > compFPS (e.g. 50p footage in a
-                        // 25p comp would land at the correct position plus
-                        // the extra scaling, throwing it off).
-                        var plateOffsetSec = (mainComp.frameRate > 0)
-                                           ? (1 / mainComp.frameRate)
-                                           : 0;
-                        nL.startTime = ri.s - plateOffsetSec;
+                        // Plate starts exactly at fullStart (ri.s). An earlier
+                        // version subtracted one mainComp frame here "to
+                        // compensate for the render-queue epsilon pushing the
+                        // first rendered frame past a frame boundary" — but a
+                        // difference-matte test against the pre-roundtrip
+                        // output showed the compensation itself introduced a
+                        // +1 frame drift (roundtripped pixels arrived 1 frame
+                        // earlier than the source). timeSpanStart + 0.0001
+                        // lands INSIDE the frame at fullStart (intervals are
+                        // [N/fps, (N+1)/fps)), so AE renders that frame as
+                        // frame 0 of the plate — no offset needed.
+                        nL.startTime = ri.s;
                         nL.position.setValue([ri.w/2, ri.h/2]);
                         nL.label = 11;
                         nL.property("Marker").setValueAtTime(ri.cs, cutMarker("cut in"));
