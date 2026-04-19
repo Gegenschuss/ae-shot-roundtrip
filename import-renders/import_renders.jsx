@@ -347,6 +347,53 @@ optional flat _grade/ folder for Resolve returns:
         return result;
     }
 
+    // Save As → next _v## version before the import touches anything.
+    // Same VFX-versioning rule shot_roundtrip uses: MyProject_v03.aep →
+    // MyProject_v04.aep. If the filename has no _v## suffix, tack on
+    // _v01. If the target already exists on disk, bump further. The
+    // ORIGINAL file stays untouched as the rollback point; the AE
+    // session continues in the new file. Returns the new File on
+    // success, or null on failure (caller aborts so the original is
+    // never modified).
+    function pad(n, s) { var str = "" + n; while (str.length < s) str = "0" + str; return str; }
+    function saveAsNextVersion() {
+        var cur = proj.file;
+        if (!cur) return null;
+        var baseName = cur.name.replace(/\.aep$/i, "");
+        var m = baseName.match(/^(.*?)(_?v)(\d+)$/);
+        var stem, prefix, width, next;
+        if (m) {
+            stem   = m[1];
+            prefix = m[2];
+            width  = m[3].length;
+            next   = parseInt(m[3], 10) + 1;
+        } else {
+            stem   = baseName;
+            prefix = "_v";
+            width  = 2;
+            next   = 1;
+        }
+        var newFile = null;
+        while (next < 10000) {
+            var candidate = new File(cur.parent.fsName + "/" + stem + prefix + pad(next, width) + ".aep");
+            if (!candidate.exists) { newFile = candidate; break; }
+            next++;
+        }
+        if (!newFile) {
+            alert("Import Renders & Grades: could not find an unused version number for the backup copy.\nAborting so nothing is modified.");
+            return null;
+        }
+        try {
+            proj.save();
+            proj.save(newFile);
+        } catch (eSave) {
+            alert("Import Renders & Grades: failed to save versioned copy —\n" + eSave.message +
+                  "\n\nAborting so the original file stays untouched.");
+            return null;
+        }
+        return newFile;
+    }
+
     // Derive the inner plate-precomp name from a shotComp name.
     //   "KM_010_comp"    -> "KM_010_plate"
     //   "KM_010_comp_OS" -> "KM_010_plate_OS"
@@ -434,6 +481,16 @@ optional flat _grade/ folder for Resolve returns:
     var compsWithNewRenders = [];
     var dryRunLog          = [];
     var errorLog           = [];
+
+    // Save As → next _v## version BEFORE any DOM mutation, matching
+    // the shot_roundtrip convention. Every change this script makes
+    // lands in the new file; the original sits on disk as the rollback
+    // point. Dry-run skips the bump (no mutations to back up).
+    var versionedFile = null;
+    if (!dryRun) {
+        versionedFile = saveAsNextVersion();
+        if (!versionedFile) return;   // aborted; original untouched
+    }
 
     if (!dryRun) app.beginUndoGroup("Import Renders & Grades");
     try {
@@ -584,109 +641,114 @@ optional flat _grade/ folder for Resolve returns:
 
                     try {
                         var newLayer = importTarget.layers.add(footageItem);
-                        // Alignment strategy:
-                        //   Anchor to the container's "cut in" / "cut out"
-                        //   markers (ensurePlatePrecomp copies them from
-                        //   the outer shotComp onto the new precomp, and
-                        //   shot_roundtrip writes them onto every shotComp)
-                        //   — these are the authoritative cut boundaries
-                        //   and are independent of whether the plate has
-                        //   been trimmed to cut or is still showing full
-                        //   handles. Falls back to plate-layer markers,
-                        //   then plate inPoint/outPoint, then comp time 0.
-                        //
-                        //   Duration-driven branch:
-                        //     - new clip duration ≈ cut duration  → cut-only
-                        //       render (Resolve default): frame 0 → cut_in.
-                        //     - new clip duration ≈ plate duration → full
-                        //       file with handles: mirror plate.startTime and
-                        //       pin inPoint/outPoint to the cut range.
-                        //     - unknown duration → frame 0 → cut_in (safe).
-                        var cutInCT = null, cutOutCT = null;
-                        try {
-                            if (importTarget.markerProperty && importTarget.markerProperty.numKeys > 0) {
-                                for (var mkI = 1; mkI <= importTarget.markerProperty.numKeys; mkI++) {
-                                    var mkV = importTarget.markerProperty.keyValue(mkI);
-                                    var mkCmt = (mkV && mkV.comment) ? String(mkV.comment).toLowerCase() : "";
-                                    if (mkCmt === "cut in")  cutInCT  = importTarget.markerProperty.keyTime(mkI);
-                                    if (mkCmt === "cut out") cutOutCT = importTarget.markerProperty.keyTime(mkI);
-                                }
-                            }
-                        } catch (eCM) {}
-                        if (cutInCT === null && plateLayer) {
+                        if (platePrecomp) {
+                            // Dumb stack inside the _plate precomp: drop at
+                            // t=0, no trimming, no marker fiddling. The
+                            // outer layer in _comp already carries the
+                            // preserved inPoint/outPoint/stretch from the
+                            // hero layer, so any per-layer alignment here
+                            // fights that and can shift full-handle
+                            // imports by a frame.
+                            newLayer.startTime = 0;
+                        } else {
+                            // Fallback — no hero layer to precompose, so
+                            // the import lands flat in the outer _comp.
+                            // Run the original cut-marker + duration-match
+                            // cascade so it still lands on the cut range.
+                            //   Duration-driven branch:
+                            //     - new clip duration ≈ cut duration  →
+                            //       cut-only render (Resolve default):
+                            //       frame 0 → cut_in.
+                            //     - new clip duration ≈ plate duration →
+                            //       full file with handles: mirror
+                            //       plate.startTime and pin inPoint/
+                            //       outPoint to the cut range.
+                            //     - unknown duration → frame 0 → cut_in.
+                            var cutInCT = null, cutOutCT = null;
                             try {
-                                var pLM = plateLayer.property("Marker");
-                                if (pLM && pLM.numKeys > 0) {
-                                    for (var pmkI = 1; pmkI <= pLM.numKeys; pmkI++) {
-                                        var pmkV = pLM.keyValue(pmkI);
-                                        var pmkCmt = (pmkV && pmkV.comment) ? String(pmkV.comment).toLowerCase() : "";
-                                        // plate-layer markers are in SOURCE time
-                                        if (pmkCmt === "cut in")  cutInCT  = plateLayer.startTime + pLM.keyTime(pmkI);
-                                        if (pmkCmt === "cut out") cutOutCT = plateLayer.startTime + pLM.keyTime(pmkI);
+                                if (importTarget.markerProperty && importTarget.markerProperty.numKeys > 0) {
+                                    for (var mkI = 1; mkI <= importTarget.markerProperty.numKeys; mkI++) {
+                                        var mkV = importTarget.markerProperty.keyValue(mkI);
+                                        var mkCmt = (mkV && mkV.comment) ? String(mkV.comment).toLowerCase() : "";
+                                        if (mkCmt === "cut in")  cutInCT  = importTarget.markerProperty.keyTime(mkI);
+                                        if (mkCmt === "cut out") cutOutCT = importTarget.markerProperty.keyTime(mkI);
                                     }
                                 }
-                            } catch (ePLM) {}
-                        }
-                        if (cutInCT === null && plateLayer) {
-                            cutInCT  = plateLayer.inPoint;
-                            cutOutCT = plateLayer.outPoint;
-                        }
-
-                        var alignTolerance = 0.5 / importTarget.frameRate;
-                        var newSrcDur = 0;
-                        try { newSrcDur = footageItem.duration; } catch (eND) {}
-
-                        if (cutInCT !== null) {
-                            var cutDur = (cutOutCT !== null) ? (cutOutCT - cutInCT) : 0;
-                            var plateSrcDur = 0;
-                            if (plateLayer) { try { plateSrcDur = plateLayer.source.duration; } catch (ePD) {} }
-
-                            if (newSrcDur > 0 && cutDur > 0 &&
-                                Math.abs(newSrcDur - cutDur) <= alignTolerance) {
-                                newLayer.startTime = cutInCT;
-                            } else if (plateLayer && plateSrcDur > 0 &&
-                                       Math.abs(newSrcDur - plateSrcDur) <= alignTolerance) {
-                                newLayer.startTime = plateLayer.startTime;
+                            } catch (eCM) {}
+                            if (cutInCT === null && plateLayer) {
                                 try {
-                                    if (cutOutCT !== null) newLayer.outPoint = cutOutCT;
-                                    newLayer.inPoint = cutInCT;
-                                } catch (eTrim) {}
-                            } else {
-                                newLayer.startTime = cutInCT;
+                                    var pLM = plateLayer.property("Marker");
+                                    if (pLM && pLM.numKeys > 0) {
+                                        for (var pmkI = 1; pmkI <= pLM.numKeys; pmkI++) {
+                                            var pmkV = pLM.keyValue(pmkI);
+                                            var pmkCmt = (pmkV && pmkV.comment) ? String(pmkV.comment).toLowerCase() : "";
+                                            // plate-layer markers are in SOURCE time
+                                            if (pmkCmt === "cut in")  cutInCT  = plateLayer.startTime + pLM.keyTime(pmkI);
+                                            if (pmkCmt === "cut out") cutOutCT = plateLayer.startTime + pLM.keyTime(pmkI);
+                                        }
+                                    }
+                                } catch (ePLM) {}
                             }
-                        } else {
-                            newLayer.startTime = 0;
+                            if (cutInCT === null && plateLayer) {
+                                cutInCT  = plateLayer.inPoint;
+                                cutOutCT = plateLayer.outPoint;
+                            }
+
+                            var alignTolerance = 0.5 / importTarget.frameRate;
+                            var newSrcDur = 0;
+                            try { newSrcDur = footageItem.duration; } catch (eND) {}
+
+                            if (cutInCT !== null) {
+                                var cutDur = (cutOutCT !== null) ? (cutOutCT - cutInCT) : 0;
+                                var plateSrcDur = 0;
+                                if (plateLayer) { try { plateSrcDur = plateLayer.source.duration; } catch (ePD) {} }
+
+                                if (newSrcDur > 0 && cutDur > 0 &&
+                                    Math.abs(newSrcDur - cutDur) <= alignTolerance) {
+                                    newLayer.startTime = cutInCT;
+                                } else if (plateLayer && plateSrcDur > 0 &&
+                                           Math.abs(newSrcDur - plateSrcDur) <= alignTolerance) {
+                                    newLayer.startTime = plateLayer.startTime;
+                                    try {
+                                        if (cutOutCT !== null) newLayer.outPoint = cutOutCT;
+                                        newLayer.inPoint = cutInCT;
+                                    } catch (eTrim) {}
+                                } else {
+                                    newLayer.startTime = cutInCT;
+                                }
+                            } else {
+                                newLayer.startTime = 0;
+                            }
+                            // Copy cut markers onto the new layer so the
+                            // outer-comp flat fallback still shows the
+                            // roundtrip's cut boundaries. Skipped in the
+                            // precomp path — the plate inside the precomp
+                            // already carries them.
+                            var srcMkr = null;
+                            if (plateLayer) {
+                                try {
+                                    var pm = plateLayer.property("Marker");
+                                    if (pm && pm.numKeys > 0) srcMkr = pm;
+                                } catch (eMkrPL) {}
+                            }
+                            if (!srcMkr) {
+                                try {
+                                    if (importTarget.markerProperty && importTarget.markerProperty.numKeys > 0) {
+                                        srcMkr = importTarget.markerProperty;
+                                    }
+                                } catch (eMkrCP) {}
+                            }
+                            if (srcMkr) {
+                                try {
+                                    var newMkr = newLayer.property("Marker");
+                                    for (var mi = 1; mi <= srcMkr.numKeys; mi++) {
+                                        try { newMkr.setValueAtTime(srcMkr.keyTime(mi), srcMkr.keyValue(mi)); } catch (e) {}
+                                    }
+                                } catch (eMkrWrite) {}
+                            }
                         }
                         newLayer.position.setValue([importTarget.width / 2, importTarget.height / 2]);
                         newLayer.label = (category === "grade") ? 11 : 14;
-                        // Copy cut markers onto the new layer. Prefer the plate
-                        // layer's own markers; fall back to the comp's
-                        // comp-level markers (which shot_roundtrip writes to
-                        // every shotComp) so imports still get markers even
-                        // when the plate layer was created outside the
-                        // roundtrip and has none of its own.
-                        var srcMkr = null;
-                        if (plateLayer) {
-                            try {
-                                var pm = plateLayer.property("Marker");
-                                if (pm && pm.numKeys > 0) srcMkr = pm;
-                            } catch (eMkrPL) {}
-                        }
-                        if (!srcMkr) {
-                            try {
-                                if (importTarget.markerProperty && importTarget.markerProperty.numKeys > 0) {
-                                    srcMkr = importTarget.markerProperty;
-                                }
-                            } catch (eMkrCP) {}
-                        }
-                        if (srcMkr) {
-                            try {
-                                var newMkr = newLayer.property("Marker");
-                                for (var mi = 1; mi <= srcMkr.numKeys; mi++) {
-                                    try { newMkr.setValueAtTime(srcMkr.keyTime(mi), srcMkr.keyValue(mi)); } catch (e) {}
-                                }
-                            } catch (eMkrWrite) {}
-                        }
                         // Position the new layer just above the current stack
                         // anchor (plate for renders, topmost existing render/
                         // grade for grades). Then promote the new layer to the
@@ -746,6 +808,11 @@ optional flat _grade/ folder for Resolve returns:
             + "Comps with renders:  " + statsComps + "\n"
             + "Renders to import:   " + statsImported + "\n"
             + "Already present:     " + statsSkipped;
+
+    if (versionedFile) {
+        msg += "\n\nWorking in:          " + versionedFile.name
+             + "\n(original preserved on disk as the rollback point)";
+    }
 
     if (dryRunLog.length > 0) {
         msg += "\n\nWould import:";
