@@ -2125,6 +2125,18 @@ NOTES
                             for (var wci = 0; wci < wrapperComps.length; wci++) {
                                 var wComp = wrapperComps[wci];
                                 if (!wComp) continue;
+                                // Skip shared comps: if this wrapper is referenced
+                                // from anywhere outside the chain we just walked
+                                // (e.g. another layer in mainComp also uses it,
+                                // or it lives in another precomp the user keeps),
+                                // renaming would surprise them by retitling user-
+                                // meaningful work as a shot artifact. Pure throw-
+                                // away wrappers like AE-auto "X.mov Comp 1" have
+                                // usedIn.length === 1 (only their immediate parent
+                                // in this chain) and still get renamed.
+                                var wUsedCount = 1;
+                                try { wUsedCount = wComp.usedIn.length; } catch(eUI) {}
+                                if (wUsedCount > 1) continue;
                                 var wcId;
                                 try { wcId = wComp.id; } catch(eWcId) { continue; }
                                 if (!intermedCompRegistry[wcId]) {
