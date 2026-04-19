@@ -184,12 +184,16 @@ work is underway. The pipeline is designed around this:
 
 
     Before anything else, negative-stretch reversals are rewritten
-    into their time-remap equivalent (stretch → `100`, two
-    keyframes at in and out that reproduce the reversed playback).
-    Same visual result, but the pipeline handles the remap form
-    correctly end-to-end. The [Reverse Stretch → Remap](#helpers)
-    helper exposes the same conversion as a standalone button so
-    you can preview or debug it on one layer at a time.
+    into their time-remap equivalent (stretch → `100`, time-remap
+    keyframes that reproduce the reversed playback). Same visual
+    result, but the pipeline handles the remap form correctly
+    end-to-end. A difference-key comparison against the original
+    reversed layer may show a minor sub-frame shift at cut
+    boundaries — negligible in normal viewing, but worth knowing
+    if you're diff-matting converted vs. original. The
+    [Reverse Stretch → Remap](#helpers) helper exposes the same
+    conversion as a standalone button so you can preview or debug
+    it on one layer at a time.
 
   - **Non-reversed time effects** (forward ramps, non-negative
     stretches) proceed silently. Top-level ones get auto-precomposed
@@ -252,7 +256,7 @@ work is underway. The pipeline is designed around this:
   | Setting | Value |
   |---|---|
   | Render | Individual clips |
-  | Format | QuickTime (match your VFX render codec, e.g. ProRes 4444) |
+  | Format | QuickTime (match your VFX render codec, e.g. ProRes 422 HQ) |
   | Resolution | Same as source |
   | File destination | `{project}/Roundtrip/_grade/` |
   | Filename uses | Custom |

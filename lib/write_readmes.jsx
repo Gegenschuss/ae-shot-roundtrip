@@ -114,7 +114,7 @@ function writeGradeReadme(folder) {
         "----------------------\n" +
         "  Render         Individual clips\n" +
         "  Format         QuickTime (match your VFX render codec,\n" +
-        "                            e.g. ProRes 4444)\n" +
+        "                            e.g. ProRes 422 HQ)\n" +
         "  Resolution     Same as source\n" +
         "  Destination    this folder\n" +
         "  Filename       Custom\n" +

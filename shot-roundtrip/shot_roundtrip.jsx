@@ -47,7 +47,7 @@ For each selected layer the script:
       - Precomp: wraps the (renamed) _container precomp at full duration.
       CUT IN / CUT OUT markers indicate the exact cut points.
 
-  4.  Queues  shotname_comp  in the AE render queue. Output: ProRes 4444 .mov
+  4.  Queues  shotname_comp  in the AE render queue. Output: ProRes 422 HQ .mov
       to  Roundtrip/{shotName}/plate/  (or the configured OM template).
 
   5.  After render, imports the plate directly from
@@ -70,7 +70,7 @@ UI OPTIONS
   Increment       Step between shot numbers (default 10).
   Handles         Head and tail handle frames added around the cut.
   Overscan        Expand plate resolution by a percentage (0 = off).
-  OM Template     AE Output Module template name for the render (e.g. ProRes 4444).
+  OM Template     AE Output Module template name for the render (e.g. ProRes 422 HQ).
   Generate Nuke Script      Write the .nk AppendClip script to Roundtrip/.
   Generate Premiere XML     Write the FCP 7 .xml sequence to Roundtrip/.
   Skip Render (debug)       Build the comp structure without triggering a render.
@@ -203,7 +203,7 @@ NOTES
         r4.add("statictext", undefined, "%");
 
         var r5 = addRow(pnlOpt, "OM Template:");
-        var etOM = r5.add("edittext", undefined, "ProRes 4444");
+        var etOM = r5.add("edittext", undefined, "ProRes 422 HQ");
         etOM.preferredSize = [150, FIELD_H];
 
         var r6 = addRow(pnlOpt, "Shots Folder:");
@@ -243,7 +243,7 @@ NOTES
             exportXML:     "true",
             createDynLink: "true",
             overscan:      "10",
-            omTemplate:    "ProRes 4444",
+            omTemplate:    "ProRes 422 HQ",
             shotsFolder:   "../Roundtrip"
         };
         function srLoad(key, fallback) {
@@ -666,7 +666,7 @@ NOTES
         // Edit these if your pipeline uses a different codec or color transform.
         var NUKE_FILE_TYPE = "mov64";
         var NUKE_CODEC     = "appr";                  // Apple ProRes
-        var NUKE_PROFILE   = "ProRes 4:4:4:4 12-bit";
+        var NUKE_PROFILE   = "ProRes 4:2:2 HQ 10-bit";
         var NUKE_COLOR     = "rec709";
 
         // Nuke script_directory expression. When set as Root.project_directory,
@@ -1005,28 +1005,29 @@ NOTES
                 // For negatively-stretched layers AE swaps the reported in/out:
                 //   inPoint  = comp-LATER  edge (source-earlier side)
                 //   outPoint = comp-EARLIER edge (source-later side)
-                // Capture, compute source times, normalize into comp-timeline order.
+                // Normalize into comp-timeline order before sampling source times.
                 var startT   = layer.startTime;
                 var stretch  = layer.stretch;
                 var rawIn    = layer.inPoint;
                 var rawOut   = layer.outPoint;
                 var frameDur = layer.containingComp.frameDuration;
 
+                var compStart, compEnd;
+                if (rawIn <= rawOut) { compStart = rawIn;  compEnd = rawOut; }
+                else                 { compStart = rawOut; compEnd = rawIn;  }
+
                 // sourceTime(compTime) = (compTime - startTime) * (100 / stretch).
                 // For reversed layers AE anchors startTime one frame past the last
                 // rendered source frame, so subtract one frameDur to land on the
                 // source time that's actually on screen.
-                var srcAtRawIn  = (rawIn  - startT) * (100 / stretch) - frameDur;
-                var srcAtRawOut = (rawOut - startT) * (100 / stretch) - frameDur;
-
-                var compStart, compEnd, srcAtStart, srcAtEnd;
-                if (rawIn <= rawOut) {
-                    compStart  = rawIn;        compEnd  = rawOut;
-                    srcAtStart = srcAtRawIn;   srcAtEnd = srcAtRawOut;
-                } else {
-                    compStart  = rawOut;       compEnd  = rawIn;
-                    srcAtStart = srcAtRawOut;  srcAtEnd = srcAtRawIn;
-                }
+                //
+                // Sample at the FIRST (compStart) and LAST (compEnd - frameDur)
+                // rendered comp frames — not the layer edges. outPoint is
+                // exclusive, so compEnd itself is never rendered; pairing srcAtEnd
+                // at compEnd with the (cutDur - frameDur) slope denominator below
+                // would mismatch by one frameDur and drift the end of playback.
+                var srcAtStart = (compStart            - startT) * (100 / stretch) - frameDur;
+                var srcAtEnd   = (compEnd  - frameDur  - startT) * (100 / stretch) - frameDur;
 
                 if (srcAtStart < 0)      srcAtStart = 0;
                 if (srcAtStart > srcDur) srcAtStart = srcDur;
@@ -1054,20 +1055,20 @@ NOTES
                 // extrapolate past the last key in *_dynamicLink wrappers or
                 // anywhere else the layer gets extended.
                 //
-                // endKeyTime sits AT compEnd (on the cut_out marker) rather
-                // than one frame earlier. The LAST rendered frame is still at
-                // compEnd - frameDur (outPoint exclusive), and the LINEAR
-                // interpolation between (compStart, srcAtStart) and
-                // (compEnd, endKeyVal) hits srcAtEnd exactly at that frame —
-                // we just extrapolate endKeyVal along the slope so the key
-                // sits on the marker without changing playback.
-                //
-                // Slope = (srcAtEnd - srcAtStart) / (cutDur - frameDur) —
-                // the actual stretch rate, since srcAtStart/srcAtEnd sample
-                // the comp time span of (cutDur - frameDur) (compStart to
-                // last rendered frame at compEnd - frameDur). This captures
-                // any negative-stretch magnitude (-100 → slope -1,
+                // Slope = (srcAtEnd - srcAtStart) / (cutDur - frameDur) — the
+                // actual stretch rate between the first and last rendered comp
+                // frames. Captures any negative-stretch magnitude (-100 → -1,
                 // -50 → -2, -200 → -0.5, -124 → ≈ -0.806).
+                //
+                // endKeyTime sits AT compEnd (on the cut_out marker) rather
+                // than at the last rendered frame. endKeyVal is extrapolated
+                // one frameDur past srcAtEnd along the slope, so the key sits
+                // on the marker while LINEAR interpolation between (compStart,
+                // srcAtStart) and (compEnd, endKeyVal) still hits srcAtEnd
+                // exactly at the last rendered frame (compEnd - frameDur).
+                // Don't lower-clamp endKeyVal: extrapolating past source edge
+                // is expected here (for full-clip reversal endKeyVal lands at
+                // about -frameDur) and clamping it to 0 would break the slope.
                 var endKeyTime = compEnd;
                 var cutDurLen  = compEnd - compStart;
                 var handleSec  = (layer.containingComp && layer.containingComp.frameRate)
@@ -1079,13 +1080,11 @@ NOTES
                 var preTime    = compStart - handleSec;
                 var postTime   = compEnd   + handleSec;
                 var preVal     = srcAtStart - slope * handleSec;
-                var endKeyVal  = srcAtStart + slope * cutDurLen;
-                var postVal    = srcAtStart + slope * (cutDurLen + handleSec);
+                var endKeyVal  = srcAtEnd   + slope * frameDur;
+                var postVal    = srcAtEnd   + slope * (frameDur + handleSec);
                 if (preVal    < 0)      preVal    = 0;
                 if (preVal    > srcDur) preVal    = srcDur;
-                if (endKeyVal < 0)      endKeyVal = 0;
                 if (endKeyVal > srcDur) endKeyVal = srcDur;
-                if (postVal   < 0)      postVal   = 0;
                 if (postVal   > srcDur) postVal   = srcDur;
 
                 // Write our keys first, then prune AE's auto-keys — clearing

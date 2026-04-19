@@ -64,29 +64,30 @@ other Hold modes may shift the layer's visual extent after stretch reset.
         //    For negatively-stretched layers AE swaps the reported in/out:
         //      inPoint  = comp-LATER  edge (source-earlier side)
         //      outPoint = comp-EARLIER edge (source-later side)
-        //    Normalize into comp-timeline order.
+        //    Normalize into comp-timeline order before sampling source times.
         var startT   = layer.startTime;
         var stretch  = layer.stretch;
         var rawIn    = layer.inPoint;
         var rawOut   = layer.outPoint;
         var frameDur = layer.containingComp.frameDuration;
 
+        var compStart, compEnd;
+        if (rawIn <= rawOut) { compStart = rawIn;  compEnd = rawOut; }
+        else                 { compStart = rawOut; compEnd = rawIn;  }
+
         // sourceTime(compTime) = (compTime - startTime) * (100 / stretch)
         // For stretch = -100 this reduces to (startTime - compTime).
         // Empirically, for reversed layers AE anchors startTime one frame past
         // the last-rendered source frame, so subtract one frameDur to get the
         // source time that's actually on screen.
-        var srcAtRawIn  = (rawIn  - startT) * (100 / stretch) - frameDur;
-        var srcAtRawOut = (rawOut - startT) * (100 / stretch) - frameDur;
-
-        var compStart, compEnd, srcAtStart, srcAtEnd;
-        if (rawIn <= rawOut) {
-            compStart  = rawIn;        compEnd  = rawOut;
-            srcAtStart = srcAtRawIn;   srcAtEnd = srcAtRawOut;
-        } else {
-            compStart  = rawOut;       compEnd  = rawIn;
-            srcAtStart = srcAtRawOut;  srcAtEnd = srcAtRawIn;
-        }
+        //
+        // Sample at the FIRST (compStart) and LAST (compEnd - frameDur)
+        // rendered comp frames — not the layer edges. outPoint is exclusive,
+        // so compEnd itself is never rendered; pairing srcAtEnd at compEnd
+        // with the (cutDur - frameDur) slope denominator below would mismatch
+        // by one frameDur and drift the end of playback.
+        var srcAtStart = (compStart            - startT) * (100 / stretch) - frameDur;
+        var srcAtEnd   = (compEnd  - frameDur  - startT) * (100 / stretch) - frameDur;
 
         if (srcAtStart < 0)      srcAtStart = 0;
         if (srcAtStart > srcDur) srcAtStart = srcDur;
@@ -114,17 +115,18 @@ other Hold modes may shift the layer's visual extent after stretch reset.
         // outer two extend into the handle range so AE doesn't extrapolate
         // past the last key when downstream pipelines extend the layer.
         //
-        // endKeyTime sits AT compEnd (on the cut_out marker) rather than
-        // one frame earlier. The LAST rendered frame is still at
-        // compEnd - frameDur (outPoint exclusive), and LINEAR interpolation
-        // between (compStart, srcAtStart) and (compEnd, endKeyVal) hits
-        // srcAtEnd exactly at that frame — endKeyVal is extrapolated along
-        // the slope so the key sits on the marker without changing playback.
-        //
         // Slope = (srcAtEnd - srcAtStart) / (cutDur - frameDur) — the actual
-        // stretch rate, since srcAtStart/srcAtEnd sample the comp-time span
-        // of (cutDur - frameDur). Values clamp to [0, srcDur]; source-edge
-        // freeze on clamp is physically correct.
+        // stretch rate between the first and last rendered comp frames.
+        //
+        // endKeyTime sits AT compEnd (on the cut_out marker) rather than at
+        // the last rendered frame. endKeyVal is extrapolated one frameDur
+        // past srcAtEnd along the slope, so the key sits on the marker while
+        // LINEAR interpolation between (compStart, srcAtStart) and (compEnd,
+        // endKeyVal) still hits srcAtEnd exactly at the last rendered frame.
+        // Don't lower-clamp endKeyVal: for full-clip reversal it lands at
+        // about -frameDur, and clamping to 0 would break the slope.
+        // preVal/postVal keep the [0, srcDur] clamp where it represents a
+        // physically correct source-edge freeze through the handle region.
         var endKeyTime = compEnd;
         var cutDurLen  = compEnd - compStart;
         var handleSec  = handleFrames / layer.containingComp.frameRate;
@@ -134,13 +136,11 @@ other Hold modes may shift the layer's visual extent after stretch reset.
         var preTime    = compStart - handleSec;
         var postTime   = compEnd   + handleSec;
         var preVal     = srcAtStart - slope * handleSec;
-        var endKeyVal  = srcAtStart + slope * cutDurLen;
-        var postVal    = srcAtStart + slope * (cutDurLen + handleSec);
+        var endKeyVal  = srcAtEnd   + slope * frameDur;
+        var postVal    = srcAtEnd   + slope * (frameDur + handleSec);
         if (preVal    < 0)      preVal    = 0;
         if (preVal    > srcDur) preVal    = srcDur;
-        if (endKeyVal < 0)      endKeyVal = 0;
         if (endKeyVal > srcDur) endKeyVal = srcDur;
-        if (postVal   < 0)      postVal   = 0;
         if (postVal   > srcDur) postVal   = srcDur;
 
         // Write our keys FIRST. Removing all auto-keys before writing can
