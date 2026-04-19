@@ -203,6 +203,13 @@ NOTES
         var chkCreateNuke     = pnlOpt.add("checkbox", undefined, "Create Nuke Scripts");  chkCreateNuke.value     = true;
         var chkExportXML      = pnlOpt.add("checkbox", undefined, "Export Shot XML");    chkExportXML.value      = true;
         var chkCreateDynLink  = pnlOpt.add("checkbox", undefined, "Create dynamicLink Comps"); chkCreateDynLink.value = true;
+        // Note: duplicate-shared-sources is a contextual choice — it only
+        // matters when the selection actually contains shared inner
+        // footage. Its checkbox lives in the Confirm Shots preflight
+        // dialog (alongside the shared-source warning panel) rather
+        // than here, so the user only sees it when it's relevant. The
+        // persisted default still travels through this SR_DEFAULTS /
+        // srLoad chain so the last-used value survives across runs.
 
         var r4 = addRow(pnlOpt, "Overscan:");
         var etOverscan = r4.add("edittext", undefined, "10");
@@ -247,9 +254,10 @@ NOTES
             autoStart:     "true",
             increment:     "10",
             handles:       "50",
-            createNuke:    "true",
-            exportXML:     "true",
-            createDynLink: "true",
+            createNuke:        "true",
+            exportXML:         "true",
+            createDynLink:     "true",
+            sharedSourceMode:  "separate",
             overscan:      "10",
             omTemplate:    "ProRes 422 HQ",
             shotsFolder:   "../Roundtrip"
@@ -272,6 +280,9 @@ NOTES
             chkCreateNuke.value    = (s.createNuke    === "true" || s.createNuke    === true);
             chkExportXML.value     = (s.exportXML     === "true" || s.exportXML     === true);
             chkCreateDynLink.value = (s.createDynLink === "true" || s.createDynLink === true);
+            // sharedSourceMode has no main-dialog control — its dedicated
+            // preflight dialog reads srLoad("sharedSourceMode", …) at
+            // show-time and saves the user's pick on Continue.
             etOverscan.text        = s.overscan;
             etOM.text              = s.omTemplate;
             etShotsFolder.text     = s.shotsFolder;
@@ -309,6 +320,8 @@ NOTES
             srSave("createNuke",    chkCreateNuke.value);
             srSave("exportXML",     chkExportXML.value);
             srSave("createDynLink", chkCreateDynLink.value);
+            // sharedSourceMode is saved from its dedicated preflight dialog
+            // on Continue, before Confirm Shots even appears.
             srSave("overscan",      etOverscan.text);
             srSave("omTemplate",    etOM.text);
             srSave("shotsFolder",   etShotsFolder.text);
@@ -563,6 +576,162 @@ NOTES
             btnContinue.onClick = function () { w.close(1); };
 
             return w.show() === 1;
+        }
+
+        // Shared-source preflight. Fires BEFORE Confirm Shots when the
+        // selection contains the same inner footage referenced by
+        // multiple selected layers, and lets the user pick a per-clip
+        // mode for each shared source.
+        //
+        // Always returns an object so the caller can persist the
+        // dropdown state regardless of cancel/continue (so the user can
+        // re-open the dialog later and see their previous picks):
+        //   {
+        //     cancelled:    true|false,
+        //     modes:        { originalSourceId → "separate"|"shared"|"single" }
+        //                   (project-session id → mode, used by the runtime),
+        //     modesByName:  { sourceName → mode }
+        //                   (settings-friendly key → mode, persisted across runs)
+        //   }
+        // savedByName is the previous run's persisted modesByName, used
+        // to initialize each row's dropdown when the source name matches
+        // a saved entry — overrides defaultMode for that row.
+        //
+        // Modes:
+        //   separate  this source's references each get their own shot
+        //             via chain duplication; one plate per reference.
+        //   shared    this source's references collapse into one
+        //             shotComp covering the union of every reference's
+        //             visible cut; one plate, many edit positions.
+        //   single    only the FIRST reference becomes a shot (its chain
+        //             is duplicated for isolation); other references
+        //             stay untouched and keep pointing at the original
+        //             source.
+        function confirmSharedSourceMode(groups, defaultMode, savedByName) {
+            var w = new Window("dialog", "\u26A0  Shared source footage detected");
+            w.orientation = "column"; w.alignChildren = ["fill", "top"];
+            w.spacing = 10; w.margins = 14;
+
+            w.add("statictext", undefined,
+                groups.length + " source" + (groups.length === 1 ? " is" : "s are") +
+                " referenced by multiple selected layers. Pick a mode per source:");
+
+            // Bulk "Set all to" row above the list.
+            var bulkGrp = w.add("group");
+            bulkGrp.orientation = "row"; bulkGrp.alignChildren = ["left", "center"];
+            bulkGrp.spacing = 8;
+            bulkGrp.add("statictext", undefined, "Set all to:");
+            var btnAllSep = bulkGrp.add("button", undefined, "Separate");
+            var btnAllShr = bulkGrp.add("button", undefined, "Shared");
+            var btnAllSin = bulkGrp.add("button", undefined, "Single");
+            btnAllSep.preferredSize = [90, 22];
+            btnAllShr.preferredSize = [90, 22];
+            btnAllSin.preferredSize = [90, 22];
+
+            // Per-source rows. ScriptUI's listbox doesn't support inline
+            // dropdowns, so build it as a stack of statictext+statictext
+            // +dropdown groups instead.
+            var listPanel = w.add("panel");
+            listPanel.orientation = "column"; listPanel.alignChildren = ["fill", "top"];
+            listPanel.spacing = 4; listPanel.margins = [10, 12, 10, 10];
+
+            var headerRow = listPanel.add("group");
+            headerRow.orientation = "row"; headerRow.spacing = 8;
+            headerRow.alignChildren = ["left", "center"];
+            var hSrc = headerRow.add("statictext", undefined, "source");
+            hSrc.preferredSize = [260, 18];
+            var hShots = headerRow.add("statictext", undefined, "shots that reference it");
+            hShots.preferredSize = [380, 18];
+            var hMode = headerRow.add("statictext", undefined, "mode");
+            hMode.preferredSize = [120, 18];
+
+            var modeOptions = ["Separate", "Shared", "Single"];
+            var defaultIdx = (defaultMode === "shared") ? 1
+                           : (defaultMode === "single") ? 2
+                           : 0;
+
+            var rowDropdowns = [];
+            var savedByNameMap = savedByName || {};
+            for (var li = 0; li < groups.length; li++) {
+                var lg = groups[li];
+                var row = listPanel.add("group");
+                row.orientation = "row"; row.spacing = 8;
+                row.alignChildren = ["left", "center"];
+                var t1 = row.add("statictext", undefined, lg.name);
+                t1.preferredSize = [260, 22];
+                var t2 = row.add("statictext", undefined, lg.shotNames.join(", "));
+                t2.preferredSize = [380, 22];
+                var dd = row.add("dropdownlist", undefined, modeOptions);
+                dd.preferredSize = [120, 22];
+                // Per-source initial selection: previous run's saved pick
+                // for THIS source name takes precedence over the global
+                // default. Lets the user re-open the dialog after cancel
+                // and see exactly what they had.
+                var savedForThis = savedByNameMap[lg.name];
+                var perRowIdx = (savedForThis === "shared") ? 1
+                              : (savedForThis === "single") ? 2
+                              : (savedForThis === "separate") ? 0
+                              : defaultIdx;
+                dd.selection = perRowIdx;
+                rowDropdowns.push(dd);
+            }
+
+            btnAllSep.onClick = function () { for (var i = 0; i < rowDropdowns.length; i++) rowDropdowns[i].selection = 0; };
+            btnAllShr.onClick = function () { for (var i = 0; i < rowDropdowns.length; i++) rowDropdowns[i].selection = 1; };
+            btnAllSin.onClick = function () { for (var i = 0; i < rowDropdowns.length; i++) rowDropdowns[i].selection = 2; };
+
+            // Help panel explaining the three modes.
+            var helpPanel = w.add("panel", undefined, "What these modes do");
+            helpPanel.orientation = "column"; helpPanel.alignChildren = ["fill", "top"];
+            helpPanel.spacing = 4; helpPanel.margins = [10, 12, 10, 10];
+
+            function helpRow(label, desc) {
+                var hr = helpPanel.add("group");
+                hr.orientation = "row"; hr.alignChildren = ["left", "top"]; hr.spacing = 8;
+                var hl = hr.add("statictext", undefined, label);
+                hl.preferredSize = [80, 38];
+                try {
+                    hl.graphics.font = ScriptUI.newFont(hl.graphics.font.name, "BOLD", hl.graphics.font.size);
+                } catch (eHF) {}
+                var hd = hr.add("statictext", undefined, desc, { multiline: true });
+                hd.preferredSize = [700, 38];
+            }
+            helpRow("Separate",
+                "Each reference becomes its own shot. The precomp chain is duplicated per reference so each gets its own plate, " +
+                "shotComp, and disk folder. Pick this when you want to grade / VFX the same source differently per occurrence in the edit.");
+            helpRow("Shared",
+                "All references collapse into ONE shotComp. Its render covers the union of every reference's visible cut, so no frames are " +
+                "truncated. Every reference plays the same plate at its own edit position. Pick this when you want one consistent treatment everywhere.");
+            helpRow("Single",
+                "Only the FIRST reference becomes a shot (its chain is isolated via duplication). Other references in mainComp stay untouched " +
+                "and keep pointing at the original source. Pick this when you only want to roundtrip ONE occurrence and leave the others as-is.");
+
+            var btnGrp = w.add("group");
+            btnGrp.alignment = ["right", "bottom"];
+            btnGrp.margins = [0, 4, 0, 0];
+            var btnCancel   = btnGrp.add("button", undefined, "Cancel");
+            var btnContinue = btnGrp.add("button", undefined, "Continue");
+            btnCancel.preferredSize   = [100, 28];
+            btnContinue.preferredSize = [120, 28];
+            btnCancel.onClick   = function () { w.close(2); };
+            btnContinue.onClick = function () { w.close(1); };
+
+            var dlgRet = w.show();
+            // Capture selections regardless of cancel/continue so the
+            // caller can persist the dropdown state for the next run.
+            var modes = {};
+            var modesByName = {};
+            for (var di = 0; di < groups.length; di++) {
+                var sel = rowDropdowns[di].selection ? rowDropdowns[di].selection.index : 0;
+                var modeStr = (sel === 1) ? "shared" : (sel === 2) ? "single" : "separate";
+                modes[groups[di].originalSourceId] = modeStr;
+                modesByName[groups[di].name] = modeStr;
+            }
+            return {
+                cancelled:   (dlgRet !== 1),
+                modes:       modes,
+                modesByName: modesByName
+            };
         }
 
         // Precompose Trimmed — auto-precompose layers with time remap or stretch.
@@ -1417,6 +1586,78 @@ NOTES
             return out;
         }
 
+        // Deep-duplicate the precomp chain for an expandedLayers entry so
+        // subsequent replaceSource mutations on its inner footage layer
+        // don't leak back to any shared precomps in the original chain.
+        //
+        // Used by the cross-selection isolation pre-pass below: when the
+        // same footage source is referenced by two different selected
+        // layers (e.g. Cloud Space slow placed in mainComp twice), the
+        // SECOND entry gets its entire chain duplicated so it can become
+        // its own separate shot without stomping on the first entry's
+        // replaceSource. AE's CompItem.duplicate() is shallow — the
+        // duplicated comp's INNER layers are new Layer objects but their
+        // `.source` references still point at the same sub-precomps. For
+        // deeper chains we recurse: at each chain level, duplicate the
+        // sub-precomp too and replaceSource the layer so each level is
+        // isolated end-to-end.
+        //
+        // Mutates: item.layer.source (replaceSource to outer duplicate),
+        // item.found.footageLayer / .footageComp / .layerChain (rebound
+        // into the deepest duplicate).
+        function duplicateChainForItem(item) {
+            if (!item || !item.isPrecomp || !item.found) return;
+            var outerSource;
+            try { outerSource = item.layer.source; } catch(eOS) { return; }
+            if (!outerSource) return;
+            var outerDup;
+            try { outerDup = outerSource.duplicate(); } catch(eDup) { return; }
+            try { item.layer.replaceSource(outerDup, false); } catch(eRS) { return; }
+
+            var chain = item.found.layerChain || [];
+            // File the duplicates under /Shots/ so they don't clutter the
+            // project root where the user may have organised their comps.
+            try {
+                var dupBin = getShotBin(getBinFolder("Shots"), "autoPrecomps");
+                outerDup.parentFolder = dupBin;
+            } catch(eBinOD) {}
+
+            if (chain.length === 0) {
+                // Footage lives directly inside the outer. Rebind into the
+                // duplicate's equivalent layer (layer indices are preserved
+                // across CompItem.duplicate()).
+                var fIdx0;
+                try { fIdx0 = item.found.footageLayer.index; } catch(eFI0) { return; }
+                item.found.footageComp = outerDup;
+                try { item.found.footageLayer = outerDup.layer(fIdx0); } catch(eFL0) {}
+                return;
+            }
+
+            // Walk the chain, duplicating each sub-precomp and rebinding
+            // the path so the final footage layer lives in a fully-owned
+            // clone tree.
+            var currentComp = outerDup;
+            var newChain = [];
+            for (var ci = 0; ci < chain.length; ci++) {
+                var origIdx;
+                try { origIdx = chain[ci].index; } catch(eCI) { return; }
+                var layerInCurrent;
+                try { layerInCurrent = currentComp.layer(origIdx); } catch(eLI) { return; }
+                var subDup;
+                try { subDup = layerInCurrent.source.duplicate(); } catch(eSD) { return; }
+                try { layerInCurrent.replaceSource(subDup, false); } catch(eSRS) { return; }
+                try { subDup.parentFolder = dupBin; } catch(eBSD) {}
+                newChain.push(layerInCurrent);
+                currentComp = subDup;
+            }
+
+            item.found.footageComp = currentComp;
+            item.found.layerChain  = newChain;
+            var fIdxN;
+            try { fIdxN = item.found.footageLayer.index; } catch(eFIN) { return; }
+            try { item.found.footageLayer = currentComp.layer(fIdxN); } catch(eFLN) {}
+        }
+
         // Shared finalize step: conversion + auto-precompose + re-scan.
         // Mutates the DOM — only called AFTER the user commits on the
         // Confirm Shots preflight dialog. Returns the new selLayers, or
@@ -1563,6 +1804,108 @@ NOTES
             alert(msg); progress.close(); return;
         }
 
+        // Cross-selection shared-source detection. An expandedLayers entry
+        // is "shared" when another entry shares its originalSourceId BUT
+        // comes from a different mainLayerIdx (selected top-level layer).
+        // Intra-selection repeats (same outer precomp cutting one source
+        // multiple times) aren't flagged — those are expected to expand
+        // into N shots.
+        var sharedByOrig = {}; // originalSourceId → { name, shotNames[], mainLayerIdxs{} }
+        for (var sgi = 0; sgi < expandedLayers.length; sgi++) {
+            var sgItem = expandedLayers[sgi];
+            if (!sgItem.originalSourceId) continue;
+            var sgNum0  = autoShotNumbers ? autoShotNumbers[sgi] : (startNum + sgi * increment);
+            var sgShot0 = shotPrefix + pad(sgNum0, 3);
+            var sgSrc0;
+            try {
+                sgSrc0 = sgItem.isPrecomp
+                    ? (sgItem.found.footageLayer.source && sgItem.found.footageLayer.source.name)
+                    : (sgItem.layer.source && sgItem.layer.source.name);
+            } catch(eSS) { sgSrc0 = null; }
+            var grp0 = sharedByOrig[sgItem.originalSourceId];
+            if (!grp0) {
+                grp0 = {
+                    originalSourceId: sgItem.originalSourceId,
+                    name:             sgSrc0 || "(no source)",
+                    shotNames:        [],
+                    mainLayerIdxs:    {}
+                };
+                sharedByOrig[sgItem.originalSourceId] = grp0;
+            }
+            grp0.shotNames.push(sgShot0);
+            grp0.mainLayerIdxs[sgItem.mainLayerIdx] = true;
+        }
+        var sharedGroups = {};
+        var sharedGroupsList = [];
+        for (var sgK0 in sharedByOrig) {
+            if (!sharedByOrig.hasOwnProperty(sgK0)) continue;
+            var sgG0 = sharedByOrig[sgK0];
+            var sgDistinct = 0;
+            for (var sgK1 in sgG0.mainLayerIdxs) if (sgG0.mainLayerIdxs.hasOwnProperty(sgK1)) sgDistinct++;
+            if (sgDistinct >= 2) {
+                sharedGroups[sgK0] = sgG0;
+                sharedGroupsList.push(sgG0);
+            }
+        }
+
+        // Shared-source preflight dialog. Fires BEFORE Confirm Shots when
+        // sharing is detected, mirroring the reversed-clips warning's
+        // shape. Captures a per-clip mode (separate / shared / single)
+        // for each shared source. The post-accept pre-pass looks up the
+        // mode per group when deciding what to do.
+        var sharedSourceModes = {}; // originalSourceId → "separate"|"shared"|"single"
+        if (sharedGroupsList.length > 0) {
+            var sharedSourceModeDefault = srLoad("sharedSourceMode", SR_DEFAULTS.sharedSourceMode);
+            if (sharedSourceModeDefault !== "shared" && sharedSourceModeDefault !== "single") {
+                sharedSourceModeDefault = "separate";
+            }
+            // Per-source picks from previous runs, keyed by source name.
+            // Used to pre-select dropdowns so the user sees their last
+            // choices when re-opening the dialog (whether they cancelled
+            // or continued before).
+            var savedByNamePrev = {};
+            try {
+                var rawByName = srLoad("sharedSourceModesByName", "");
+                if (rawByName) {
+                    var parsed = JSON.parse(rawByName);
+                    if (parsed && typeof parsed === "object") savedByNamePrev = parsed;
+                }
+            } catch (eLBN) {}
+
+            progress.close();
+            var picked = confirmSharedSourceMode(sharedGroupsList, sharedSourceModeDefault, savedByNamePrev);
+            progress = makeProgressPanel();
+
+            // Always persist the captured selections (cancel OR continue) so
+            // the dialog opens with the same picks next time.
+            try {
+                // Merge with whatever was previously saved so picks for
+                // sources NOT in this run's selection survive.
+                for (var mK in picked.modesByName) {
+                    if (picked.modesByName.hasOwnProperty(mK)) {
+                        savedByNamePrev[mK] = picked.modesByName[mK];
+                    }
+                }
+                srSave("sharedSourceModesByName", JSON.stringify(savedByNamePrev));
+            } catch (eSBN) {}
+            // Also persist the global default (most-recent first pick) so
+            // brand-new sources without a per-name entry land on the
+            // user's most-used mode.
+            for (var ssK in picked.modes) {
+                if (picked.modes.hasOwnProperty(ssK)) {
+                    try { srSave("sharedSourceMode", picked.modes[ssK]); } catch (eSSM) {}
+                    break;
+                }
+            }
+
+            if (picked.cancelled) {
+                reportCancellation("Cancelled at the shared-source preflight \u2014 no roundtrip performed.");
+                return;
+            }
+            sharedSourceModes = picked.modes;
+            progress.update("Shared-source modes set\u2026", "", 11);
+        }
+
         // ── Confirm found shots before doing anything ──────────────────────────
         // Pre-scan existing comp names so we can flag shots that will be skipped
         var confExisting = {};
@@ -1645,14 +1988,18 @@ NOTES
             var cfFrames = "" + cfCutFrames;
             var cfRes    = (cfSrcW > 0) ? (cfSrcW + "\u00d7" + cfSrcH) : "";
 
-            // Notice column: fps mismatch + time-effect tags. Reversed effects are
-            // already surfaced via the loud dialog at the top of the run; we repeat
-            // them here per-shot so it's clear which shots the warning covered.
+            // Notice column: fps mismatch + time-effect tags + shared-source
+            // tag. Reversed effects are already surfaced via the loud dialog
+            // at the top of the run; we repeat them here per-shot so it's
+            // clear which shots the warning covered.
             var cfNoticeParts = [];
             if (cfFpsMismatch) cfNoticeParts.push("fps " + cfSrcFps + "\u2260" + cfFps);
             var cfEffects = scanSelLayerForEffects(cfItem.layer);
             for (var cfe = 0; cfe < cfEffects.length; cfe++) {
                 cfNoticeParts.push(cfEffects[cfe].label);
+            }
+            if (cfItem.originalSourceId && sharedGroups[cfItem.originalSourceId]) {
+                cfNoticeParts.push("[shared source]");
             }
             var cfNotice = cfNoticeParts.join("  ");
 
@@ -1723,6 +2070,29 @@ NOTES
             cfRow.subItems[4].text = confRows[cfi].cols[5]; // os
         }
 
+        // Shared-source warning panel. Only shown when cross-selection
+        // sharing is detected (>= 2 entries with the same originalSourceId
+        // coming from different mainLayerIdx). Lists the groups so the
+        // user can audit the selection before committing — each shared
+        // source becomes N separate shots via the chain-duplication pre-
+        // pass, each rendering only its visible portion.
+        // Compact recap of the per-clip shared-source choices picked in
+        // the dedicated preflight dialog above. Read-only — change by
+        // re-running the roundtrip and choosing again at that dialog.
+        if (sharedGroupsList.length > 0) {
+            var sharedRecapCounts = { separate: 0, shared: 0, single: 0 };
+            for (var srci = 0; srci < sharedGroupsList.length; srci++) {
+                var sm = sharedSourceModes[sharedGroupsList[srci].originalSourceId] || "separate";
+                if (sharedRecapCounts.hasOwnProperty(sm)) sharedRecapCounts[sm]++;
+            }
+            var sharedRecapParts = [];
+            if (sharedRecapCounts.separate > 0) sharedRecapParts.push(sharedRecapCounts.separate + " separate");
+            if (sharedRecapCounts.shared   > 0) sharedRecapParts.push(sharedRecapCounts.shared   + " shared");
+            if (sharedRecapCounts.single   > 0) sharedRecapParts.push(sharedRecapCounts.single   + " single");
+            confDlg.add("statictext", undefined,
+                "Shared sources: " + sharedRecapParts.join(", ") + ".");
+        }
+
         // Footer + toggle button
         var confFooterTxt = "Total: " + confTotalFrames + "  (" + (Math.round(confTotalFrames / cfFps * 10) / 10) + "s)   handles: " + handleFrames;
         confDlg.add("statictext", undefined, confFooterTxt);
@@ -1778,6 +2148,10 @@ NOTES
             return;
         }
 
+        // sharedSourceMode was already captured + persisted at the
+        // shared-source preflight dialog above (which fires before
+        // Confirm Shots). Nothing to capture here.
+
         // ── Deferred Save-As + mutations (post-accept) ───────────────────────
         // Everything from here on modifies state. Save-As to the next _v##
         // version FIRST so every change lands in the new file and the
@@ -1826,6 +2200,99 @@ NOTES
         if (expandedLayers === null) return;
         for (var osj = 0; osj < expandedLayers.length; osj++) {
             expandedLayers[osj].overscan = (osj < overscanByIndex.length) ? overscanByIndex[osj] : false;
+        }
+
+        // Cross-selection shared-source handling. Three modes from the
+        // dedicated shared-source preflight dialog (only shown when
+        // sharing was actually detected during expansion):
+        //
+        //   separate  every reference's chain is deep-duplicated up front
+        //             so each reference renders its own isolated shot.
+        //             Runs BEFORE the main loop so the first reference's
+        //             processing doesn't pre-mutate any shared precomp.
+        //
+        //   shared    references collapse into ONE shotComp that covers
+        //             the UNION of all visible ranges in source time.
+        //             First reference processes with the union widened
+        //             range; subsequent references are flagged
+        //             `.shareSkip` and the main loop skips them. The
+        //             shared precomp's inner footage layer (post-
+        //             replaceSource) covers every reference's cut, so
+        //             nothing gets truncated.
+        //
+        //   single    only the FIRST reference becomes a shot. To keep
+        //             the original source intact for the OTHER (skipped)
+        //             references in mainComp, the first reference's
+        //             chain is also deep-duplicated. Subsequent
+        //             references are flagged `.singleSkip` and the
+        //             main loop leaves them untouched.
+        var xselSeenSrc    = {};
+        var shareFirstIdx  = {}; // origId → first expandedLayers index
+        var shareUnion     = {}; // origId → {start, end} in source time
+        for (var xpi = 0; xpi < expandedLayers.length; xpi++) {
+            var xpItem = expandedLayers[xpi];
+            if (!xpItem.isPrecomp) continue;
+            if (!xpItem.originalSourceId) continue;
+            var xpOid   = xpItem.originalSourceId;
+            var xpPrior = xselSeenSrc[xpOid];
+            if (xpPrior === undefined) {
+                xselSeenSrc[xpOid]   = xpItem.mainLayerIdx;
+                shareFirstIdx[xpOid] = xpi;
+                if (xpItem.found) {
+                    shareUnion[xpOid] = {
+                        start: xpItem.found.rangeStart,
+                        end:   xpItem.found.rangeEnd
+                    };
+                }
+                continue;
+            }
+            if (xpPrior === xpItem.mainLayerIdx) continue; // intra-selection, allowed
+            var xpGroupMode = sharedSourceModes[xpOid] || "separate";
+            if (xpGroupMode === "separate") {
+                duplicateChainForItem(xpItem);
+            } else if (xpGroupMode === "shared") {
+                if (xpItem.found && shareUnion[xpOid]) {
+                    if (xpItem.found.rangeStart < shareUnion[xpOid].start) {
+                        shareUnion[xpOid].start = xpItem.found.rangeStart;
+                    }
+                    if (xpItem.found.rangeEnd > shareUnion[xpOid].end) {
+                        shareUnion[xpOid].end = xpItem.found.rangeEnd;
+                    }
+                }
+                xpItem.shareSkip = true;
+            } else { // "single"
+                xpItem.singleSkip = true;
+            }
+        }
+        // Per-group post-pass. SHARED groups: widen the first reference's
+        // range to the union and flag the shared inner precomp for the
+        // shot-aware rename so other references that still point at it
+        // read sensibly. SINGLE groups: duplicate the first reference's
+        // chain too — otherwise its mutations leak to the original
+        // source that the unprocessed sibling references still
+        // reference. SEPARATE groups need no post-pass beyond the
+        // per-entry duplication already done above.
+        for (var xpu in shareFirstIdx) {
+            if (!shareFirstIdx.hasOwnProperty(xpu)) continue;
+            var xpuMode = sharedSourceModes[xpu] || "separate";
+            var xpFirst = expandedLayers[shareFirstIdx[xpu]];
+            if (xpuMode === "shared") {
+                var xpU = shareUnion[xpu];
+                if (xpFirst && xpFirst.found && xpU) {
+                    xpFirst.found.rangeStart = xpU.start;
+                    xpFirst.found.rangeEnd   = xpU.end;
+                }
+                // Only flag the inner-rename when the shared inner precomp
+                // differs from the outer; the existing single-shot rename
+                // already covers the outer case (turns it into
+                // "shot_NN_container").
+                if (xpFirst && xpFirst.found && xpFirst.found.footageComp &&
+                    xpFirst.layer && xpFirst.found.footageComp !== xpFirst.layer.source) {
+                    xpFirst.sharedRenameInner = true;
+                }
+            } else if (xpuMode === "single") {
+                if (xpFirst) duplicateChainForItem(xpFirst);
+            }
         }
 
         var aepFolder = proj.file.parent;
@@ -1899,23 +2366,14 @@ NOTES
                     range        = { start: item.found.rangeStart, end: item.found.rangeEnd };
                     footageLayer = item.found.footageLayer;
                     footageComp  = item.found.footageComp;
-                    // Same footage source already processed by a prior entry?
-                    // Check against the ORIGINAL source id captured at expansion time —
-                    // a prior iteration's replaceSource may have swapped this footage
-                    // layer's live source to a shotComp, which would defeat this check
-                    // if we read source.id directly here.
-                    //
-                    // Dedup ONLY across different selected precomps (different
-                    // mainLayerIdx). Inside ONE selected precomp, multiple footage
-                    // layers pointing at the same source each get their own shot —
-                    // e.g. a subcomp that cuts the same clip 3 times should become
-                    // 3 shots, not collapse into 1. Cross-selection dedup is still
-                    // active: two separate precomp selections sharing an inner
-                    // footage file resolve to a single shared shotComp.
-                    var seenSrc = item.originalSourceId ? processedSourceIds[item.originalSourceId] : null;
-                    if (seenSrc && seenSrc.mainLayerIdx !== item.mainLayerIdx) {
-                        continue;
-                    }
+                    // Cross-selection sharing: the pre-pass above duplicated
+                    // chains (separate / single modes) and/or marked
+                    // entries with `.shareSkip` (shared mode — collapse
+                    // into one shotComp covering the union) or
+                    // `.singleSkip` (single mode — only first reference
+                    // becomes a shot, others stay untouched). Skip both
+                    // skip flags here.
+                    if (item.shareSkip || item.singleSkip) continue;
                 } else {
                     source = layer.source;
                     range  = getRequiredSourceRange(layer);
@@ -2176,6 +2634,15 @@ NOTES
                     plateInner.property("Marker").setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
 
                     footageLayer.replaceSource(shotComp, false);
+
+                    // Shared-mode rename of the shared inner precomp (e.g.
+                    // "Cloud Space slow") so OTHER mainComp references that
+                    // still point at it (.shareSkip entries) read shot-aware
+                    // instead of keeping the original name. Only applies in
+                    // SHARED mode, when the inner is distinct from the outer.
+                    if (item.sharedRenameInner && item.found && item.found.footageComp) {
+                        try { item.found.footageComp.name = shotName + "_shared" + osSuffix; } catch (eSRN) {}
+                    }
 
                     // When overscan is active the shotComp is larger than the original footage.
                     // The footageLayer's anchor was set for the original footage size, so sampling
