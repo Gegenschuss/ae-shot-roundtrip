@@ -231,6 +231,37 @@ work is underway. The pipeline is designed around this:
   ignored by the scan — they can't contribute reversed pixels to the
   plate.
 
+  **Shared source preflight.** When two or more selected layers
+  reference the same inner footage (the same `.mov` file, possibly
+  buried inside different precomps), the roundtrip pops a dedicated
+  preflight dialog before Confirm Shots. It lists each shared source
+  with the shot numbers that reference it and a per-row dropdown to
+  pick how the roundtrip should handle that source:
+
+  - **Separate** — chain is duplicated per reference; each becomes
+    its own shot with its own plate, shotComp, and disk folder. Pick
+    this when you want to grade / VFX the same clip differently per
+    occurrence in the edit.
+  - **Shared** — references collapse into ONE shotComp whose render
+    covers the union of every reference's visible cut. All references
+    play the same plate at their own edit positions, no frames
+    truncated. The shared inner precomp is renamed `shot_NN_shared`
+    so other references that still point at it read shot-aware. Pick
+    this when you want one consistent treatment everywhere.
+  - **Single** — only the FIRST reference becomes a shot (its chain
+    is isolated via duplication); other references stay untouched and
+    keep pointing at the original source. Pick this when you only
+    want to roundtrip one occurrence and leave the others as-is
+    (preview / temp / iterative).
+
+  Bulk **Set all to** buttons let you flip every dropdown at once.
+  Per-source picks persist across runs by source name — re-opening
+  the dialog (after Cancel or after another roundtrip on the same
+  project) restores your previous choices, and a global default
+  (most-recently-used mode) seeds any new sources you haven't picked
+  before. Cancelling here leaves the project pristine, same as
+  cancelling at Confirm Shots.
+
 - **Import Renders & Grades** — Scans all `*_comp` compositions in the
   project and imports finished returns from two sources:
 
