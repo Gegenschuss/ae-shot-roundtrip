@@ -117,6 +117,9 @@ work is underway. The pipeline is designed around this:
   `shot_030`, …) so new shots can be **sandwiched in** without renumbering:
   `shot_015` slots between `_010` and `_020`, `shot_012` between `_010` and
   `_015`, and so on. You get 9 free slots between any two adjacent shots.
+  With **Auto** (default), the numbering is automatic: drop a new layer
+  between two existing shots in the main comp, run the roundtrip, and the
+  new shot picks the midpoint number on its own.
 - **Dropped shots** stay numbered — just delete the comp and the folder on
   disk. Gaps in numbering are harmless.
 - **Reordered shots** are rare; if editorial really shuffles the order,
@@ -155,8 +158,29 @@ work is underway. The pipeline is designed around this:
   wrapper comp per layer for Premiere reconstruction.
 
   Per-shot bins live under `/Shots/{prefix}_NNN/`. Multi-footage precomp
-  containers get their own range bin `/Shots/{prefix}_FIRST_LAST/`. All
-  Dynamic Link wrappers land in `/Shots/dynamicLink/`.
+  containers get their own range bin `/Shots/{prefix}_FIRST_LAST/`, and
+  wrapper precomps deeper in the chain are renamed `{shotName}_inner`
+  (innermost), `{shotName}_inner2`, `{shotName}_inner3`, … — so the
+  project panel reads shot-by-shot instead of keeping AE's auto-generated
+  `"X.mov Comp 1"` names. All Dynamic Link wrappers land in
+  `/Shots/dynamicLink/`.
+
+  **Auto shot numbering** (default: on). Ticking the **Auto** checkbox
+  next to Start Number makes the roundtrip pick each shot's number from
+  its position in the main comp: new shots sandwich in between existing
+  ones automatically. If you have `shot_010`, `shot_030`, `shot_040` and
+  drop a new layer between `_030` and `_040`, the next run assigns
+  `shot_035` without you doing any math. Uncheck Auto to revert to the
+  old `start + N × increment` behavior for explicit control.
+
+  **Multi-use sources.** A single selected precomp that cuts the same
+  clip multiple times (e.g. three trims of `C2458.mov` inside one
+  precomp) produces three separate shots, each rendering just its own
+  cut. Cross-selection dedup still applies: two different selected
+  precomps that share an inner footage file resolve to a single shared
+  shotComp. Only the visible portion of each layer is rendered, even
+  when the footage is buried several precomps deep — a 2-second cut of
+  a 2-minute clip only renders 2 seconds (+ handles).
 
   <img src="docs/roundtrip_settings.png" width="340" alt="Shot Roundtrip settings dialog">
 
@@ -414,13 +438,19 @@ premiere-trim-handles-close-gaps/    # Premiere Pro companion extension
 ## FAQ
 
 **Is it going to mess up my project?**
-Shot Roundtrip version-bumps your `.aep` automatically on launch
-(`_v03.aep` → `_v04.aep`, etc.) and runs the whole pipeline in the
-new file. Your original stays on disk as the rollback point, so if
-anything goes wrong you just reopen the older version. On disk, the
-only writes the roundtrip makes outside the `.aep` go into your
-chosen `Roundtrip/` folder (plate renders + a few auto-generated
-`README.txt` scaffolds). Nothing else is touched.
+Shot Roundtrip version-bumps your `.aep` to the next `_v##` (e.g.
+`_v03.aep` → `_v04.aep`) and runs the whole pipeline in the new file.
+Your original stays on disk as the rollback point, so if anything
+goes wrong you just reopen the older version. The version bump only
+fires AFTER you click **Process** on the Confirm Shots preflight, so
+cancelling on the reversal warning OR the preflight leaves both your
+project AND your disk completely untouched — no orphan version files.
+Cancelling DURING the build (progress-bar Cancel) or in AE's render
+window pops a summary listing what was created before the cancel and
+nudges you to `Cmd/Ctrl+Z` for rollback (or just re-open the previous
+`_v##` from disk). On disk, the only writes outside the `.aep` go
+into your chosen `Roundtrip/` folder (plate renders + a few
+auto-generated `README.txt` scaffolds). Nothing else is touched.
 
 **Do I have to use Premiere?**
 No. The AE side works standalone. The Premiere extension only
