@@ -138,16 +138,21 @@ work is underway. The pipeline is designed around this:
 >    and never change it after the first roundtrip run. The prefix ties
 >    comps, disk folders, and Premiere clips together — renaming breaks the
 >    chain.
-> 2. **Number shots in increments of 10** (`{prefix}_010`, `{prefix}_020`,
+> 2. **Shot numbers stay spaced by 10** (`{prefix}_010`, `{prefix}_020`,
 >    …) so new shots can be inserted between existing ones without
->    renumbering.
+>    renumbering. With **Auto** (default), the script picks numbers
+>    automatically and sandwiches new layers between the existing
+>    shots' time positions in mainComp — uncheck Auto to set Start
+>    Number + Increment manually.
 > 3. **Never rename `_comp` compositions.** Tools like `Import Renders & Grades`
 >    and `Export Shot XML` derive the disk path from the comp name
 >    (`{prefix}_010_comp` → `{shots}/{prefix}_010/`). Comps without the
 >    `_comp` suffix are silently ignored.
-> 4. **Never move the plate layer's in-point** inside a `_comp`. Render
->    imports are aligned to the plate's start time — shifting it misaligns
->    every VFX return.
+> 4. **Never move the plate layer's in-point.** In a fresh `_comp` it's
+>    the hero footage layer at the bottom; after `Import Renders & Grades`
+>    runs it lives inside the `_plate` precomp at the bottom of the
+>    stack. Render imports and re-render passes locate it by tag and
+>    align to its start time — shifting it misaligns every VFX return.
 
 - **Shot Roundtrip** — Core tool. For every selected layer (direct footage
   OR precomp) it extracts a `{prefix}_NNN_comp` render target with
