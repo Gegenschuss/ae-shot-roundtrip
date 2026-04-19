@@ -2126,7 +2126,7 @@ NOTES
                 var pPath = new File(fsShotPlate.fsName + "/" + shotName + "_plate.mov");
                 om.file = pPath;
 
-                renderItems.push({ n: shotName, p: pPath, c: shotComp, s: fullStart, w: osWidth, h: osHeight, cs: cutStart, cd: cutDuration, bin: shotBin });
+                renderItems.push({ n: shotName, p: pPath, c: shotComp, s: fullStart, w: osWidth, h: osHeight, cs: cutStart, cd: cutDuration, bin: shotBin, rq: rq });
 
                 var cutDurationFrames = Math.round(cutDuration * safeFPS);
                 nukeDataList.push({
@@ -2163,7 +2163,58 @@ NOTES
             // appears behind the main window and looks like a UI freeze.
             progress.update("Saving project and handing off to AE's render queue\u2026", "AE's render window will take over now.", 60);
             progress.close();
-            try { proj.save(); proj.renderQueue.render(); } catch(e) { reportError("RENDER", e, "Check OM Template and Disk Space."); return; }
+            var renderException = null;
+            try { proj.save(); proj.renderQueue.render(); }
+            catch (eRender) { renderException = eRender; }
+
+            // Inspect per-item statuses to distinguish three outcomes:
+            //   USER_STOPPED → user hit Cancel in AE's render window
+            //   ERR_STOPPED  → render errored out (codec, disk, etc.)
+            //   DONE         → rendered cleanly
+            // renderQueue.render() can throw OR return silently on cancel
+            // depending on the AE version, so item.status is the canonical
+            // source of truth. Only inspect items WE queued this run
+            // (tracked via renderItems[i].rq) — leftover items from prior
+            // sessions are ignored.
+            var rDone = 0, rUserStopped = 0, rErrStopped = 0, rOther = 0;
+            for (var rsI = 0; rsI < renderItems.length; rsI++) {
+                var rqi = renderItems[rsI].rq;
+                if (!rqi) { rOther++; continue; }
+                try {
+                    if      (rqi.status === RQItemStatus.DONE)         rDone++;
+                    else if (rqi.status === RQItemStatus.USER_STOPPED) rUserStopped++;
+                    else if (rqi.status === RQItemStatus.ERR_STOPPED)  rErrStopped++;
+                    else rOther++;
+                } catch (eSt) { rOther++; }
+            }
+
+            if (rUserStopped > 0) {
+                // User hit Cancel in AE's render window. Route through the
+                // shared cancellation summary and skip ALL post-render
+                // steps — importing partial plates, dynamicLink, Nuke,
+                // XML would all produce broken output referencing files
+                // that don't exist. Re-running the roundtrip detects
+                // existing shot comps as already-processed and skips
+                // them, so the already-finished renders are preserved.
+                cancelStats.rendersDone = rDone;
+                reportCancellation("Render cancelled in AE's render window.\n"
+                    + "Rendered " + rDone + " of " + renderItems.length + " plate(s) before cancel.\n\n"
+                    + "Re-run the roundtrip to finish the remaining shots \u2014 "
+                    + "the already-built shot comps will be detected as existing and skipped.");
+                return;
+            }
+
+            if (rErrStopped > 0 || renderException) {
+                var hint = "Check OM Template and disk space.";
+                if (rErrStopped > 0) {
+                    hint = rErrStopped + " plate(s) errored out during render. " + hint;
+                }
+                reportError("RENDER",
+                    renderException || { message: "Render stopped with errors", line: "\u2014" },
+                    hint);
+                return;
+            }
+
             progress = makeProgressPanel();
             progress.update("Render finished, importing plates\u2026", "", 65);
         } else if (!chkSkipRender.value && renderItems.length === 0) {
