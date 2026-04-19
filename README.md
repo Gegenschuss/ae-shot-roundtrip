@@ -300,6 +300,19 @@ work is underway. The pipeline is designed around this:
   don't belong in that handoff, so they live in a separate flat archive
   at the shots root. Handed-off shot folders stay clean.
 
+  **Why the `_plate` precomp is created here, not by Shot Roundtrip:**
+  during the editorial-to-VFX phase the artist works directly on the
+  hero plate layer in `_comp` — adding effects, masks, transforms,
+  animation. Keeping the structure flat at this stage means there's no
+  precomp inviting them to apply work *inside* it (which would later
+  need to be transplanted onto the OUTER layer when imports start
+  stacking). When Import Renders & Grades runs the first time, the
+  hero layer is precomposed with `moveAllAttributes=false` — every
+  effect / transform / mask / keyframe stays on the OUTER layer in
+  `_comp`, and only the raw plate source moves into the new precomp.
+  From then on, the artist's work and the VFX/grade returns share the
+  same outer layer cleanly.
+
   <img src="docs/import_renders.png" width="340" alt="Import Renders & Grades dialog">
 
 - **Re-render Plates** — Re-renders every shot's original plate to a new
