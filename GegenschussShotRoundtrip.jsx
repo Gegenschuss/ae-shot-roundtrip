@@ -40,6 +40,12 @@
             file:   "import-renders/import_renders.jsx"
         },
         {
+            group:  "Roundtrip",
+            label:  "Re-render Plates",
+            tip:    "Re-render every shot's original plate to {shot}_{suffix}.mov (default suffix: denoised) ready for external denoising or stabilization, and import the results back into each _plate precomp as plate variants.",
+            file:   "re-render-plates/re_render_plates.jsx"
+        },
+        {
             group:  "SynthEyes",
             label:  "Convert JSX \u2192 AEP",
             tip:    "Batch-run SynthEyes-exported .jsx files and save each result as a .aep project.",

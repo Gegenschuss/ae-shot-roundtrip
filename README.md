@@ -242,6 +242,49 @@ work is underway. The pipeline is designed around this:
 
   <img src="docs/import_renders.png" width="340" alt="Import Renders & Grades dialog">
 
+- **Re-render Plates** — Re-renders every shot's original plate to a new
+  filename, ready to be handed to an external tool (Neat Video, a
+  stabilizer, Mocha, …) and brought back in. Outputs land next to the
+  plate so they travel with the shot on handoff:
+
+  ```
+  {shots}/{shot}/plate/{shot}_{suffix}.mov
+  {shots}/{shot}/plate/{shot}_{suffix}_OS.mov    (overscan variant)
+  ```
+
+  Dialog asks for a suffix (default `denoised`), the shots folder, and
+  the output-module template. It then, for every `*_comp`:
+
+  1. Ensures the `{shot}_plate` precomp exists (creates it on the fly
+     using the exact logic of Import Renders & Grades if the layout is
+     still flat — `moveAllAttributes=false`, so every effect/transform/
+     mask on the hero stays on the OUTER layer in `_comp`).
+  2. Temporarily isolates the bottom-most tagged plate layer inside the
+     precomp (disables everything else), so the render output is the
+     pristine plate — never a previously imported grade, render, or
+     plate variant. Enabled states are restored in a `try/finally`.
+  3. Queues the `_plate` precomp for render (not the outer `_comp`),
+     skipping any comp-level effects/masks the artist may have added.
+  4. After render, imports each rendered file back and stacks it above
+     the original plate inside the `_plate` precomp — below any VFX
+     renders or grades. Matches Import Renders & Grades' "renders stack
+     above the topmost plate-like layer" rule, so the new variant
+     becomes the active plate for future re-renders/imports without
+     disturbing the rest of the stack.
+
+  **External roundtrip:** take `{shot}_{suffix}.mov` into your external
+  tool, process it, and **overwrite the file in place** (keep the same
+  filename). Back in AE, select the imported footage item and
+  `File → Reload Footage` — the processed pixels appear instantly in
+  every `_plate` precomp that references it, and the VFX + grade stack
+  above keeps working as-is.
+
+  The script version-bumps the `.aep` first (same rule as Import
+  Renders & Grades) so the original file stays on disk as a rollback
+  point. Re-runs always re-render the ORIGINAL plate, never the
+  variant — so running it twice gives you a fresh raw plate, not a
+  copy of last pass's output.
+
 - **Export Shot XML** — Exports an FCPXML 1.8 timeline of all `*_comp`
   compositions for import into DaVinci Resolve. For each comp, the active
   footage layer is picked to match whichever layout Import Renders & Grades
@@ -361,6 +404,7 @@ export-shot-xml/                     # FCPXML export for Resolve
 syntheyes-convert-jsx-to-aep/        # SynthEyes → AEP batch
 syntheyes-import-aep-to-ae/          # SynthEyes AEP import/wire-up
 import-renders/                      # VFX render re-import
+re-render-plates/                    # Re-render plates for denoising / stabilization
 create-dynamiclink-comps/            # Standalone Dynamic Link builder
 little-toolbox/                      # Little Toolbox launcher panel
 helpers/                             # Little Toolbox scripts: mute audio, guide preview, reverse-stretch → remap, precompose trimmed, copy comp markers, extend precomp handles

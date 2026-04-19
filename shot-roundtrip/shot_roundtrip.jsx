@@ -377,6 +377,40 @@ NOTES
         // created don't crash on progress.update/close/isCancelled calls.
         var progress = { update: function(){}, isCancelled: function(){ return false; }, close: function(){} };
 
+        // Cancellation bookkeeping — every cancel path feeds reportCancellation()
+        // so the user sees WHAT got done before the cancel instead of a bare
+        // "cancelled" message. Flags and counters are updated inline as the
+        // script makes progress. versionedFile is declared further down; the
+        // closure here resolves it at call time so the cancel report can cite
+        // the new version filename once it exists.
+        var cancelStats = {
+            mutationsStarted: false, // flipped to true after saveAsNextVersion succeeds
+            shotsCreated:     0,     // shotComps built in the main roundtrip loop
+            rendersDone:      0      // plates imported after render
+        };
+        function reportCancellation(reason) {
+            var lines = [reason];
+            if (!cancelStats.mutationsStarted) {
+                lines.push("", "No changes were made to your project.");
+            } else {
+                lines.push("");
+                if (typeof versionedFile !== "undefined" && versionedFile) {
+                    lines.push("Working file: " + versionedFile.name);
+                    lines.push("(original preserved on disk as the rollback point)");
+                    lines.push("");
+                }
+                if (cancelStats.shotsCreated > 0) {
+                    lines.push("Shot comps built before cancel: " + cancelStats.shotsCreated);
+                }
+                if (cancelStats.rendersDone > 0) {
+                    lines.push("Plates imported before cancel:  " + cancelStats.rendersDone);
+                }
+                lines.push("", "Use Cmd/Ctrl+Z to undo the session's work, or reopen the original .aep from disk.");
+            }
+            try { progress.close(); } catch (e) {}
+            alert(lines.join("\n"));
+        }
+
         // Cancel-check helper. Call at the top of each long loop iteration:
         //   if (cancelCheck()) return;
         // The return triggers any enclosing try/finally, which correctly ends
@@ -386,8 +420,7 @@ NOTES
         // its own cancel button.
         function cancelCheck() {
             if (!progress.isCancelled()) return false;
-            progress.close();
-            alert("Roundtrip cancelled by user.\n\nIf any comps or renders were already created, use Cmd/Ctrl+Z to undo them.");
+            reportCancellation("Roundtrip cancelled by user.");
             return true;
         }
         function pad(n, s) { var str = "" + n; while (str.length < s) str = "0" + str; return str; }
@@ -908,19 +941,13 @@ NOTES
 
         selLayers.sort(function(a, b) { return a.layer.index - b.layer.index; });
 
-        // Save As to the next _v## version BEFORE any DOM mutation. Every
-        // change the roundtrip makes lands in the new file; the original
-        // sits on disk as the rollback point. Abort on failure so the user
-        // never ends up with modifications on the original file.
-        var versionedFile = saveAsNextVersion();
-        if (!versionedFile) return;
-
+        // Open the progress palette now — the preflight scan and Confirm
+        // Shots prep use it for feedback. The Save-As _v## bump is deferred
+        // until AFTER Confirm Shots is accepted (see below), so that
+        // cancelling on any preflight dialog leaves the user's original
+        // .aep untouched on disk — no empty-change version files left over.
+        var versionedFile = null;
         progress = makeProgressPanel();
-        progress.update(
-            "Working in new version: " + versionedFile.name,
-            "Original is preserved on disk as the backup.",
-            1
-        );
         progress.update("Preflight: scanning " + selLayers.length + " selected layer(s)\u2026", "", 2);
 
         // ── Preflight: time remap or time stretch ─────────────────────────────
@@ -1147,160 +1174,194 @@ NOTES
         // Loud dialog only when a reversal is present. Non-reversed time
         // effects proceed silently and show up as passive info next to the
         // shot in the Confirm Shots dialog.
+        //
+        // IMPORTANT: this dialog is ADVISORY — read-only. The actual
+        // stretch→remap conversion and auto-precompose happen much later,
+        // after the user commits on the Confirm Shots preflight. Hitting
+        // "Continue" here only acknowledges the warning; cancelling on
+        // EITHER this dialog OR Confirm Shots leaves the project pristine.
         if (reversedList.length > 0) {
             // Close palette before modal so macOS hands focus to the dialog.
             progress.close();
             var revOk = confirmReversedClips(reversedList);
             progress = makeProgressPanel();
-            if (!revOk) { progress.close(); return; } // user canceled → nothing changed yet
-            progress.update("Reversed clips confirmed, continuing\u2026", "", 4);
-        }
-
-        // Only AFTER the user confirms (or no reversals were present) do we
-        // convert negative-stretch reversals into time-remap equivalents. The
-        // dialog above is the last chance to bail out without modifications.
-        // Snapshot the mainComp selection — the converter flips layer/property
-        // selection flags to dodge the "hidden property" error, which collapses
-        // the user's original selection in the UI. Restore it after the loop.
-        var preConvertSelection = [];
-        for (var pcs = 0; pcs < mainComp.selectedLayers.length; pcs++) {
-            preConvertSelection.push(mainComp.selectedLayers[pcs]);
-        }
-        var autoConverted = 0;
-        progress.update("Converting any reversed clips to time remaps\u2026", "0 of " + selLayers.length, 5);
-        for (var cri = 0; cri < selLayers.length; cri++) {
-            if (cancelCheck()) return;
-            progress.update(null,
-                "layer " + (cri + 1) + " of " + selLayers.length,
-                5 + 2 * (cri / Math.max(1, selLayers.length)));
-            var crl = selLayers[cri].layer;
-            if (!isScanRelevantLayer(crl)) continue;
-            if (convertStretchReversalToRemap(crl)) autoConverted++;
-            if (crl.source instanceof CompItem) {
-                autoConverted += convertAllStretchReversalsInComp(crl.source);
-            }
-        }
-        try {
-            for (var dse = 1; dse <= mainComp.numLayers; dse++) mainComp.layer(dse).selected = false;
-            for (var rse = 0; rse < preConvertSelection.length; rse++) {
-                try { preConvertSelection[rse].selected = true; } catch(eSelRestore) {}
-            }
-        } catch(eSelSnap) {}
-
-        // Build trAffected AFTER the convert so inPoint/outPoint reflect the
-        // post-conversion forward-ordered values (convertStretchReversalToRemap
-        // swaps them into comp-timeline order when re-anchoring a reversed
-        // layer). autoPrecomposeTrimmed expects forward in/out.
-        var trAffected = []; // top-level, fed to autoPrecomposeTrimmed
-        for (var ti = 0; ti < selLayers.length; ti++) {
-            var tl = selLayers[ti].layer;
-            var topFx = describeTimeEffect(tl);
-            if (topFx) {
-                trAffected.push({ selIdx: ti, index: tl.index, name: tl.name, inPoint: tl.inPoint, outPoint: tl.outPoint,
-                    label: topFx.label, reversed: topFx.reversed });
-            }
-        }
-
-        if (trAffected.length > 0) {
-            progress.update("Auto-precomposing " + trAffected.length + " time-remapped layer(s)\u2026", "", 9);
-            if (!autoPrecomposeTrimmed(mainComp, trAffected)) {
-                // autoPrecomposeTrimmed returns false on internal error OR on
-                // cancel. Surface the cancel message if that's why we stopped.
-                if (cancelCheck()) return;
-                progress.close(); return;
-            }
-
-            // Re-scan the selection — the precomposed layers replaced the originals.
-            // Apply the same filter as the initial scan: auto-precompose's selection
-            // restoration puts every pre-existing selection back on the layer panel,
-            // including shape/text/null/adjustment/guide layers the user happened to
-            // have selected alongside the real shots. Without this filter those come
-            // through as roundtrip candidates and crash downstream on null .source.
-            selLayers = [];
-            for (var ri = 1; ri <= mainComp.numLayers; ri++) {
-                if (!mainComp.layer(ri).selected) continue;
-                var rLayer = mainComp.layer(ri);
-                if (!rLayer.hasVideo || rLayer.guideLayer || rLayer.adjustmentLayer || rLayer.nullLayer) continue;
-                if (rLayer.source === null) { skippedLayers.push(rLayer.name + " (Shape/Text)"); continue; }
-                var rIsFile = false;
-                try { if (rLayer.source.mainSource && rLayer.source.mainSource.file) rIsFile = true; } catch(eRIS) {}
-                var rIsPrecomp = (rLayer.source instanceof CompItem);
-                if (rIsFile || rIsPrecomp) {
-                    selLayers.push({ layer: rLayer, isPrecomp: rIsPrecomp, mainLayerIdx: rLayer.index });
-                } else {
-                    skippedLayers.push(rLayer.name + " (Solid/Shape/Text)");
-                }
-            }
-            if (selLayers.length === 0) {
-                alert("No layers selected after auto-precompose. Please select the precomposed layers and try again.");
-                progress.close();
+            if (!revOk) {
+                reportCancellation("Cancelled at the reversed-clips warning \u2014 no roundtrip performed.");
                 return;
             }
+            progress.update("Reversed clips acknowledged, preparing preflight\u2026", "", 4);
         }
 
-        // Expand precomp entries: each footage layer found inside becomes its own shot.
-        // Direct footage entries pass through unchanged.
-        progress.update("Expanding precomps and resolving source ranges\u2026", "0 of " + selLayers.length, 11);
-        var expandedLayers = [];
-        for (var ei = 0; ei < selLayers.length; ei++) {
-            if (cancelCheck()) return;
-            progress.update(null, (ei + 1) + " of " + selLayers.length + " selected layers walked", 11 + (5 * ei / Math.max(1, selLayers.length)));
-            var eItem = selLayers[ei];
-            if (!eItem.isPrecomp) {
-                expandedLayers.push({
-                    layer: eItem.layer, mainLayerIdx: eItem.layer.index, isPrecomp: false, found: null, totalInPrecomp: 0,
-                    // Snapshot the source id NOW, before any replaceSource runs later in the
-                    // processing loop — dedup must key on the original source, not whatever
-                    // shotComp has taken its place.
-                    originalSourceId: (eItem.layer.source && eItem.layer.source.id) ? eItem.layer.source.id : null
-                });
-            } else {
-                var eFounds = findAllFootageInPrecomp(eItem.layer.source);
-                if (eFounds.length === 0) {
-                    skippedLayers.push(eItem.layer.name + " (no footage found inside precomp)");
+        // Shared expansion: called once pre-preflight to populate the
+        // Confirm Shots dialog from the ORIGINAL (unconverted, un-wrapped)
+        // layer state, and again post-accept after conversion + auto-
+        // precompose to rebuild against the new container layer refs.
+        // Returns null if the user canceled mid-walk.
+        function buildExpandedLayers(selLayersIn, skippedLayersIn, progBaseStart, progBaseSpan, showProgress) {
+            var out = [];
+            for (var ei = 0; ei < selLayersIn.length; ei++) {
+                if (cancelCheck()) return null;
+                if (showProgress) {
+                    progress.update(null,
+                        (ei + 1) + " of " + selLayersIn.length + " selected layers walked",
+                        progBaseStart + (progBaseSpan * ei / Math.max(1, selLayersIn.length)));
+                }
+                var eItem = selLayersIn[ei];
+                if (!eItem.isPrecomp) {
+                    out.push({
+                        layer: eItem.layer, mainLayerIdx: eItem.layer.index, isPrecomp: false, found: null, totalInPrecomp: 0,
+                        // Snapshot the source id NOW, before any replaceSource runs later in the
+                        // processing loop — dedup must key on the original source, not whatever
+                        // shotComp has taken its place.
+                        originalSourceId: (eItem.layer.source && eItem.layer.source.id) ? eItem.layer.source.id : null
+                    });
                 } else {
-                    for (var ef = 0; ef < eFounds.length; ef++) {
-                        var eF = eFounds[ef];
-                        // Derive the source range from the precomp layer's cut bounds in mainComp
-                        // (not the footage layer's own in/out, which is often the full untrimmed duration).
-                        // For footage directly inside the precomp we do a two-step mapping:
-                        //   mainComp cut → precomp time (via the precomp layer's stretch/remap)
-                        //   precomp time → source time   (via the footage layer's stretch/remap)
-                        // For deeper nesting we fall back to the footage layer's own in/out.
-                        var eRange;
-                        if (eF.footageComp === eItem.layer.source) {
-                            var pcIn  = mapTimeToSource(eItem.layer, eItem.layer.inPoint);
-                            var pcOut = mapTimeToSource(eItem.layer, eItem.layer.outPoint);
-                            var rA = mapTimeToSource(eF.footageLayer, pcIn);
-                            var rB = mapTimeToSource(eF.footageLayer, pcOut);
-                            eRange = { start: rA, end: rB };
-                        } else {
-                            eRange = getRequiredSourceRange(eF.footageLayer);
+                    var eFounds = findAllFootageInPrecomp(eItem.layer.source);
+                    if (eFounds.length === 0) {
+                        skippedLayersIn.push(eItem.layer.name + " (no footage found inside precomp)");
+                    } else {
+                        for (var ef = 0; ef < eFounds.length; ef++) {
+                            var eF = eFounds[ef];
+                            // Derive the source range from the precomp layer's cut bounds in mainComp
+                            // (not the footage layer's own in/out, which is often the full untrimmed duration).
+                            // For footage directly inside the precomp we do a two-step mapping:
+                            //   mainComp cut → precomp time (via the precomp layer's stretch/remap)
+                            //   precomp time → source time   (via the footage layer's stretch/remap)
+                            // For deeper nesting we fall back to the footage layer's own in/out.
+                            var eRange;
+                            if (eF.footageComp === eItem.layer.source) {
+                                var pcIn  = mapTimeToSource(eItem.layer, eItem.layer.inPoint);
+                                var pcOut = mapTimeToSource(eItem.layer, eItem.layer.outPoint);
+                                var rA = mapTimeToSource(eF.footageLayer, pcIn);
+                                var rB = mapTimeToSource(eF.footageLayer, pcOut);
+                                eRange = { start: rA, end: rB };
+                            } else {
+                                eRange = getRequiredSourceRange(eF.footageLayer);
+                            }
+                            // Normalize so start <= end. A reversed time remap (decreasing
+                            // values from in to out) or a nested reversal produces an inverted
+                            // range here; downstream math — plate duration, handle expansion,
+                            // marker placement — all assume forward order. Reversal direction
+                            // is tracked separately via scanLayerTimeEffect/reversedList, so
+                            // losing the ordering here is safe.
+                            if (eRange.start > eRange.end) {
+                                var eRtmp = eRange.start; eRange.start = eRange.end; eRange.end = eRtmp;
+                            }
+                            out.push({
+                                layer: eItem.layer, mainLayerIdx: eItem.layer.index, isPrecomp: true, totalInPrecomp: eFounds.length,
+                                found: { footageLayer: eF.footageLayer, footageComp: eF.footageComp,
+                                         rangeStart: eRange.start, rangeEnd: eRange.end,
+                                         breadcrumb: eF.breadcrumb || [] },
+                                // Snapshot the original footage source id NOW. The processing loop
+                                // later calls replaceSource on this footageLayer — after that,
+                                // reading footageLayer.source.id returns the shotComp id, so dedup
+                                // must key on this pre-mutation snapshot instead.
+                                originalSourceId: (eF.footageLayer.source && eF.footageLayer.source.id) ? eF.footageLayer.source.id : null
+                            });
                         }
-                        // Normalize so start <= end. A reversed time remap (decreasing
-                        // values from in to out) or a nested reversal produces an inverted
-                        // range here; downstream math — plate duration, handle expansion,
-                        // marker placement — all assume forward order. Reversal direction
-                        // is tracked separately via scanLayerTimeEffect/reversedList, so
-                        // losing the ordering here is safe.
-                        if (eRange.start > eRange.end) {
-                            var eRtmp = eRange.start; eRange.start = eRange.end; eRange.end = eRtmp;
-                        }
-                        expandedLayers.push({
-                            layer: eItem.layer, mainLayerIdx: eItem.layer.index, isPrecomp: true, totalInPrecomp: eFounds.length,
-                            found: { footageLayer: eF.footageLayer, footageComp: eF.footageComp,
-                                     rangeStart: eRange.start, rangeEnd: eRange.end,
-                                     breadcrumb: eF.breadcrumb || [] },
-                            // Snapshot the original footage source id NOW. The processing loop
-                            // later calls replaceSource on this footageLayer — after that,
-                            // reading footageLayer.source.id returns the shotComp id, so dedup
-                            // must key on this pre-mutation snapshot instead.
-                            originalSourceId: (eF.footageLayer.source && eF.footageLayer.source.id) ? eF.footageLayer.source.id : null
-                        });
                     }
                 }
             }
+            return out;
         }
+
+        // Shared finalize step: conversion + auto-precompose + re-scan.
+        // Mutates the DOM — only called AFTER the user commits on the
+        // Confirm Shots preflight dialog. Returns the new selLayers, or
+        // null on abort/failure (caller returns early).
+        function applyTimeEffectConversions() {
+            // Snapshot the mainComp selection — the converter flips layer/
+            // property selection flags to dodge the "hidden property" error,
+            // which collapses the user's original selection in the UI.
+            // Restore it after the loop.
+            var preConvertSelection = [];
+            for (var pcs = 0; pcs < mainComp.selectedLayers.length; pcs++) {
+                preConvertSelection.push(mainComp.selectedLayers[pcs]);
+            }
+            progress.update("Converting any reversed clips to time remaps\u2026", "0 of " + selLayers.length, 16);
+            for (var cri = 0; cri < selLayers.length; cri++) {
+                if (cancelCheck()) return null;
+                progress.update(null,
+                    "layer " + (cri + 1) + " of " + selLayers.length,
+                    16 + 2 * (cri / Math.max(1, selLayers.length)));
+                var crl = selLayers[cri].layer;
+                if (!isScanRelevantLayer(crl)) continue;
+                convertStretchReversalToRemap(crl);
+                if (crl.source instanceof CompItem) {
+                    convertAllStretchReversalsInComp(crl.source);
+                }
+            }
+            try {
+                for (var dse = 1; dse <= mainComp.numLayers; dse++) mainComp.layer(dse).selected = false;
+                for (var rse = 0; rse < preConvertSelection.length; rse++) {
+                    try { preConvertSelection[rse].selected = true; } catch(eSelRestore) {}
+                }
+            } catch(eSelSnap) {}
+
+            // Build trAffected AFTER the convert so inPoint/outPoint reflect
+            // the post-conversion forward-ordered values
+            // (convertStretchReversalToRemap swaps them into comp-timeline
+            // order when re-anchoring a reversed layer). autoPrecomposeTrimmed
+            // expects forward in/out.
+            var trAffected = [];
+            for (var ti = 0; ti < selLayers.length; ti++) {
+                var tl = selLayers[ti].layer;
+                var topFx = describeTimeEffect(tl);
+                if (topFx) {
+                    trAffected.push({ selIdx: ti, index: tl.index, name: tl.name, inPoint: tl.inPoint, outPoint: tl.outPoint,
+                        label: topFx.label, reversed: topFx.reversed });
+                }
+            }
+
+            if (trAffected.length > 0) {
+                progress.update("Auto-precomposing " + trAffected.length + " time-remapped layer(s)\u2026", "", 18);
+                if (!autoPrecomposeTrimmed(mainComp, trAffected)) {
+                    // autoPrecomposeTrimmed returns false on internal error OR
+                    // on cancel. Surface the cancel message if that's why we
+                    // stopped.
+                    if (cancelCheck()) return null;
+                    return null;
+                }
+
+                // Re-scan the selection — the precomposed layers replaced the
+                // originals. Apply the same filter as the initial scan:
+                // auto-precompose's selection restoration puts every pre-
+                // existing selection back on the layer panel, including
+                // shape/text/null/adjustment/guide layers the user happened
+                // to have selected alongside the real shots. Without this
+                // filter those come through as roundtrip candidates and
+                // crash downstream on null .source.
+                var newSel = [];
+                for (var ri = 1; ri <= mainComp.numLayers; ri++) {
+                    if (!mainComp.layer(ri).selected) continue;
+                    var rLayer = mainComp.layer(ri);
+                    if (!rLayer.hasVideo || rLayer.guideLayer || rLayer.adjustmentLayer || rLayer.nullLayer) continue;
+                    if (rLayer.source === null) { skippedLayers.push(rLayer.name + " (Shape/Text)"); continue; }
+                    var rIsFile = false;
+                    try { if (rLayer.source.mainSource && rLayer.source.mainSource.file) rIsFile = true; } catch(eRIS) {}
+                    var rIsPrecomp = (rLayer.source instanceof CompItem);
+                    if (rIsFile || rIsPrecomp) {
+                        newSel.push({ layer: rLayer, isPrecomp: rIsPrecomp, mainLayerIdx: rLayer.index });
+                    } else {
+                        skippedLayers.push(rLayer.name + " (Solid/Shape/Text)");
+                    }
+                }
+                if (newSel.length === 0) {
+                    alert("No layers selected after auto-precompose. Please select the precomposed layers and try again.");
+                    return null;
+                }
+                return newSel;
+            }
+            return selLayers;
+        }
+
+        // Expand selected layers into shot entries (ORIGINAL, unconverted
+        // state — the conversion + auto-precompose runs only after the
+        // Confirm Shots dialog is accepted, so this preview reflects
+        // exactly what the user currently has in their comp).
+        progress.update("Expanding precomps and resolving source ranges\u2026", "0 of " + selLayers.length, 11);
+        var expandedLayers = buildExpandedLayers(selLayers, skippedLayers, 11, 5, true);
+        if (expandedLayers === null) return;
 
         if (expandedLayers.length === 0) {
             var msg = "Keine gültigen Layer gefunden.";
@@ -1350,7 +1411,11 @@ NOTES
             }
 
             // Cut duration
-            var cfCutFrames = Math.round((cfItem.layer.outPoint - cfItem.layer.inPoint) * cfFps);
+            // Math.abs: for a reversed-stretch layer AE reports outPoint < inPoint
+            // (the stretch negativity swaps the edges). The preview shows
+            // pre-conversion state, so normalize here — duration is the same
+            // either way, just unsigned.
+            var cfCutFrames = Math.round(Math.abs(cfItem.layer.outPoint - cfItem.layer.inPoint) * cfFps);
             confTotalFrames += cfCutFrames + handleFrames * 2;
 
             // FPS mismatch?
@@ -1514,7 +1579,60 @@ NOTES
         var confResult = confDlg.show();
         progress = makeProgressPanel();
         progress.update("Confirm Shots dialog closed, preparing build\u2026", "", 15);
-        if (confResult !== 1) { progress.close(); return; }
+        if (confResult !== 1) {
+            reportCancellation("Cancelled on the Confirm Shots preflight \u2014 no roundtrip performed.");
+            return;
+        }
+
+        // ── Deferred Save-As + mutations (post-accept) ───────────────────────
+        // Everything from here on modifies state. Save-As to the next _v##
+        // version FIRST so every change lands in the new file and the
+        // original sits on disk as the rollback point. If the Save-As
+        // fails (disk full, permissions, etc.), bail out without touching
+        // anything — the user's project is still the original on disk.
+        versionedFile = saveAsNextVersion();
+        if (!versionedFile) { progress.close(); return; }
+        cancelStats.mutationsStarted = true;
+        progress.update(
+            "Working in new version: " + versionedFile.name,
+            "Original is preserved on disk as the backup.",
+            15
+        );
+
+        // Now do the deferred DOM mutations: rewrite stretch→remap and
+        // auto-precompose time-remapped layers. Running these earlier
+        // (e.g. right after the reversal warning's Continue button) meant
+        // the project was already mutated if the user later cancelled on
+        // Confirm Shots. Deferring to here gives a clean rollback all the
+        // way up to the Process click.
+        //
+        // Snapshot per-shot overscan decisions before we rebuild expandedLayers
+        // so the user's toggles in the Confirm Shots dialog survive. Shot
+        // order and count are preserved across convert + auto-precompose
+        // (conversion is in-place; auto-precompose wraps each top-level
+        // time-remapped layer 1:1 into a container precomp), so index→shot
+        // mapping stays stable.
+        var overscanByIndex = [];
+        for (var osi = 0; osi < expandedLayers.length; osi++) {
+            overscanByIndex.push(!!expandedLayers[osi].overscan);
+        }
+
+        var postConvertSel = applyTimeEffectConversions();
+        if (postConvertSel === null) { progress.close(); return; }
+        selLayers = postConvertSel;
+
+        // Rebuild expandedLayers from the post-conversion selection. The
+        // inner references (found.footageLayer, found.footageComp) on the
+        // old expandedLayers are fine for precomp selections, but a top-
+        // level direct-footage layer that got wrapped by autoPrecomposeTrimmed
+        // now has a different mainComp layer reference — the fresh walk
+        // picks up the new container layer correctly.
+        progress.update("Re-expanding selection after conversion\u2026", "0 of " + selLayers.length, 20);
+        expandedLayers = buildExpandedLayers(selLayers, skippedLayers, 20, 2, true);
+        if (expandedLayers === null) return;
+        for (var osj = 0; osj < expandedLayers.length; osj++) {
+            expandedLayers[osj].overscan = (osj < overscanByIndex.length) ? overscanByIndex[osj] : false;
+        }
 
         var aepFolder = proj.file.parent;
         // Accept either an absolute path (e.g. picked via the Browse button)
@@ -1591,7 +1709,16 @@ NOTES
                     // a prior iteration's replaceSource may have swapped this footage
                     // layer's live source to a shotComp, which would defeat this check
                     // if we read source.id directly here.
-                    if (item.originalSourceId && processedSourceIds[item.originalSourceId]) {
+                    //
+                    // Dedup ONLY across different selected precomps (different
+                    // mainLayerIdx). Inside ONE selected precomp, multiple footage
+                    // layers pointing at the same source each get their own shot —
+                    // e.g. a subcomp that cuts the same clip 3 times should become
+                    // 3 shots, not collapse into 1. Cross-selection dedup is still
+                    // active: two separate precomp selections sharing an inner
+                    // footage file resolve to a single shared shotComp.
+                    var seenSrc = item.originalSourceId ? processedSourceIds[item.originalSourceId] : null;
+                    if (seenSrc && seenSrc.mainLayerIdx !== item.mainLayerIdx) {
                         continue;
                     }
                 } else {
@@ -1632,6 +1759,7 @@ NOTES
                 shotComp.displayStartTime = 0;
                 shotComp.parentFolder = shotBin;
                 shotComp.label = 11; // Orange — shot comp (render target)
+                cancelStats.shotsCreated++;
 
                 var plateInner = shotComp.layers.add(source);
                 plateInner.startTime = 0;
@@ -1765,7 +1893,14 @@ NOTES
                     // footageLayer are preserved in place — nothing to transplant.
                     // Key on the ORIGINAL source id (pre-replaceSource) so later iterations
                     // can still detect the dupe after this replacement mutates the live source.
-                    if (item.originalSourceId) processedSourceIds[item.originalSourceId] = { bin: shotBin };
+                    // Record mainLayerIdx so the dedup check above can distinguish
+                    // within-selection repeats (allowed → N shots) from cross-
+                    // selection sharing (deduped → 1 shot). Only write on first
+                    // occurrence so mainLayerIdx isn't clobbered by later same-
+                    // selection iterations.
+                    if (item.originalSourceId && !processedSourceIds[item.originalSourceId]) {
+                        processedSourceIds[item.originalSourceId] = { mainLayerIdx: item.mainLayerIdx, bin: shotBin };
+                    }
 
                     plateInner.property("Marker").setValueAtTime(cutStart, cutMarker("cut in"));
                     plateInner.property("Marker").setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
@@ -2088,6 +2223,7 @@ NOTES
                         var bl=tComp.layers.byName("GUIDE_BURNIN"); if(bl) { bl.locked=false; bl.moveToBeginning(); bl.locked=true; }
                         importedShots.push(ri.n);
                         count++;
+                        cancelStats.rendersDone++;
                     }
                 }
             }
