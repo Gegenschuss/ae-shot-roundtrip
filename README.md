@@ -243,11 +243,19 @@ work is underway. The pipeline is designed around this:
   <img src="docs/import_renders.png" width="340" alt="Import Renders & Grades dialog">
 
 - **Export Shot XML** — Exports an FCPXML 1.8 timeline of all `*_comp`
-  compositions for import into DaVinci Resolve. For each comp, the topmost
-  enabled footage layer whose name starts with the shot number is used as
-  the clip source (e.g. the topmost layer starting with `KM_010` in comp
-  `KM_010_comp`). Works for movie files and image sequences (MOV, MP4,
-  DPX, EXR, …).
+  compositions for import into DaVinci Resolve. For each comp, the active
+  footage layer is picked to match whichever layout Import Renders & Grades
+  has written:
+
+  - If `_comp` contains a `{shot}_plate` precomp (the current layout), the
+    export recurses into it and uses the topmost enabled footage layer
+    there — naturally the newest grade if present, else the newest VFX
+    render, else the plate.
+  - Otherwise (flat legacy layout), the export uses the topmost enabled
+    footage layer in `_comp` whose name starts with the shot number
+    (e.g. the topmost layer starting with `KM_010` in comp `KM_010_comp`).
+
+  Works for movie files and image sequences (MOV, MP4, DPX, EXR, …).
 
   **Resolve delivery setup for graded returns:**
 

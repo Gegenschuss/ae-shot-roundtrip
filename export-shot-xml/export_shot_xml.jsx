@@ -9,11 +9,24 @@
 /**
  * Export Shot XML for DaVinci Resolve  –  FCP7 / xmeml v4
  *
- * Scans the "Shots" folder for every "*_comp" composition,
- * finds the topmost enabled footage layer whose name starts with the
- * shot number (the comp name minus the "_comp" suffix),
- * and writes an FCP7-compatible XML matching Premiere Pro's export format,
- * which DaVinci Resolve imports reliably.
+ * Scans the "Shots" folder for every "*_comp" composition, picks the
+ * "active" footage layer for each shot, and writes an FCP7-compatible
+ * XML matching Premiere Pro's export format, which DaVinci Resolve
+ * imports reliably.
+ *
+ * Two layouts are supported (matching Import Renders & Grades):
+ *
+ *   1. FLAT — footage sits directly in {shot}_comp. We pick the topmost
+ *      enabled footage layer whose name starts with the shot number
+ *      (e.g. "KM_050_plate_v02.mov" in comp "KM_050_comp").
+ *
+ *   2. PRECOMP — {shot}_comp contains a {shot}_plate precomp created by
+ *      Import Renders & Grades. Inside that precomp, the stack order is
+ *      grade (top) → render → plate (bottom), and the importer disables
+ *      older files within each category. We recurse into the precomp
+ *      and pick the topmost enabled footage layer there — naturally the
+ *      most-finished visible version (latest grade if present, else the
+ *      latest VFX render, else the plate).
  *
  * Import in DaVinci Resolve via:
  *   File → Import Timeline → Import AAF, EDL, XML…
@@ -285,11 +298,38 @@
     }
 
     /**
-     * Return the topmost enabled footage layer whose name starts with the
-     * shot number (derived from the comp name by stripping "_comp"/" comp").
-     * E.g. comp "KM_050_comp" matches layers like "KM_050_plate_v02.mov",
-     * "KM_050_render.[####].exr", etc. Accepts any footage item — movie
-     * files (mov, mp4, …) and image sequences (dpx, exr, tif, …) alike.
+     * Return the topmost enabled footage layer inside a precomp. No
+     * shot-name filter — by construction the {shot}_plate precomp only
+     * holds plate/render/grade variants of this shot. Import Renders &
+     * Grades keeps the stack ordered grade → render → plate top-to-bottom
+     * and disables older files within each category, so "topmost enabled
+     * footage" resolves to the most-finished visible version.
+     */
+    function pickTopmostFootageLayerInPrecomp(comp) {
+        for (var i = 1; i <= comp.numLayers; i++) {
+            var layer = comp.layer(i);
+            if (!layer.enabled) continue;
+            if (!isFootageLayer(layer)) continue;
+            return layer;
+        }
+        return null;
+    }
+
+    /**
+     * Return the active footage layer for a shot comp. Supports both
+     * layouts written by Import Renders & Grades:
+     *
+     *   - PRECOMP: a {shot}_plate precomp layer lives directly in _comp
+     *     as the hero. We recurse into it and pick the topmost enabled
+     *     footage layer inside — naturally the newest grade, else the
+     *     newest VFX render, else the plate itself.
+     *   - FLAT: footage sits directly in _comp. We pick the topmost
+     *     enabled footage layer whose name starts with the shot number
+     *     (e.g. "KM_050_plate_v02.mov" or "KM_050_render.[####].exr" in
+     *     comp "KM_050_comp").
+     *
+     * Accepts any footage item — movie files (mov, mp4, …) and image
+     * sequences (dpx, exr, tif, …) alike.
      */
     function pickFootageLayer(comp) {
         var shot = shotNameFromComp(comp.name);
@@ -298,6 +338,14 @@
         for (var i = 1; i <= comp.numLayers; i++) {
             var layer = comp.layer(i);
             if (!layer.enabled) continue;
+            if (!layer.source) continue;
+            if (layer.source instanceof CompItem &&
+                /_plate(_OS)?$/i.test(layer.source.name) &&
+                shotRe.test(layer.source.name)) {
+                var inner = pickTopmostFootageLayerInPrecomp(layer.source);
+                if (inner) return inner;
+                continue;
+            }
             if (!isFootageLayer(layer)) continue;
             if (shotRe.test(layer.name)) return layer;
         }
