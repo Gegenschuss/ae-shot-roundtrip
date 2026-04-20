@@ -308,7 +308,7 @@ NOTES
         var btnReset   = btnGrp.add("button", undefined, "Reset to Defaults"); btnReset.preferredSize  = [130, 28];
         var btnCancel  = btnGrp.add("button", undefined, "Cancel");            btnCancel.preferredSize = [80,  28];
         var btnSpacer  = btnGrp.add("statictext", undefined, "");              btnSpacer.alignment     = ["fill", "center"];
-        var btnOk      = btnGrp.add("button", undefined, "Run Roundtrip");     btnOk.preferredSize     = [130, 28];
+        var btnOk      = btnGrp.add("button", undefined, "Run Roundtrip");     btnOk.preferredSize     = [140, 28];
 
         btnReset.onClick  = function() { srApply(SR_DEFAULTS); };
         btnOk.onClick     = function() {
@@ -439,7 +439,7 @@ NOTES
             // ScriptUI window (grey in AE) instead of alert() — matches the
             // Roundtrip Complete summary's look and sidesteps the macOS
             // system-alert styling that the Ae app icon gets slapped onto.
-            var w = new Window("dialog", "Gegenschuss \u00b7 Roundtrip Cancelled");
+            var w = new Window("dialog", "Roundtrip Cancelled");
             w.orientation = "column"; w.alignChildren = ["fill", "top"];
             w.spacing = 10; w.margins = 14;
             var body = lines.join("\n");
@@ -1021,7 +1021,12 @@ NOTES
 
 
         // --- PER-SHOT NUKE SCRIPT WRITER ---
-        function writeNukeShotScript(shotFile, d, globalFPS) {
+        // shotFPS is the source PLATE's native frame rate (may differ from the
+        // mainComp / AppendClip delivery rate). Using plate-fps at Root.fps
+        // keeps Read/Write frame counts and durations in sync — using the
+        // mainComp fps here would retime every 50fps plate as 25fps on output.
+        function writeNukeShotScript(shotFile, d) {
+            var shotFPS   = d.fps || 25;
             var fullStart = 1001 - d.handles;
             var fullEnd   = fullStart + d.fullDurationFrames - 1;
             var cutStart  = 1001;
@@ -1039,7 +1044,7 @@ NOTES
             nk += "# ============================================================\n";
             nk += "#\n";
             nk += "# Shot:      " + d.name + "\n";
-            nk += "# Format:    " + d.w + "x" + d.h + " @ " + globalFPS + " fps\n";
+            nk += "# Format:    " + d.w + "x" + d.h + " @ " + shotFPS + " fps\n";
             nk += "# Handles:   " + d.handles + "f head + " + d.handles + "f tail\n";
             nk += "# Frames:    full " + fullStart + "-" + fullEnd + "  (" + d.fullDurationFrames + "f, with handles)\n";
             nk += "#            cut  " + cutStart + "-" + cutEnd + "  (" + d.cutDurationFrames + "f, editorial)\n";
@@ -1051,7 +1056,7 @@ NOTES
             nk += "# -------------\n";
             nk += "# 1. Render filename MUST start with \"" + d.name + "\" followed by a\n";
             nk += "#    non-alphanumeric character (e.g. \"" + d.name + "_v01.mov\",\n";
-            nk += "#    \"" + d.name + "_comp_v03.mov\"). The AE \"Import Renders & Grades\"\n";
+            nk += "#    \"" + d.name + "_comp_v03.mov\"). The AE \"Import Returns\"\n";
             nk += "#    tool matches returns to shot comps by this filename prefix.\n";
             nk += "# 2. Do NOT rename this shot's folder or the render/ subfolder.\n";
             nk += "#    The AE pipeline expects {shots}/" + d.name + "/render/.\n";
@@ -1062,7 +1067,7 @@ NOTES
             nk += "Root {\n inputs 0\n name " + shotFile.fsName + "\n";
             nk += " project_directory " + NUKE_PROJECT_DIR + "\n";
             nk += " format \"" + d.w + " " + d.h + " 0 0 " + d.w + " " + d.h + " 1 ProjectFormat\"\n";
-            nk += " fps " + globalFPS + "\n";
+            nk += " fps " + shotFPS + "\n";
             nk += " first_frame " + fullStart + "\n";
             nk += " last_frame " + fullEnd + "\n";
             nk += " lock_range true\n colorManagement Nuke\n OCIO_config nuke-default\n}\n";
@@ -1096,8 +1101,8 @@ NOTES
 
 
         function addGuideBurnIn(comp, shotName, cutFrame1001, fullRenderStart, handleFrames) {
-            var txtLayer = comp.layers.byName("GUIDE_BURNIN");
-            if (!txtLayer) { txtLayer = comp.layers.addText(shotName); txtLayer.name = "GUIDE_BURNIN"; }
+            var txtLayer = comp.layers.byName("Guide Burnin");
+            if (!txtLayer) { txtLayer = comp.layers.addText(shotName); txtLayer.name = "Guide Burnin"; }
             txtLayer.locked = false; txtLayer.guideLayer = true; txtLayer.label = 16; txtLayer.moveToBeginning();
             var txtProp = txtLayer.property("Source Text");
             var txtDoc = txtProp.value; txtDoc.fontSize = 80; txtDoc.fillColor = [0.5, 0.5, 0.5];
@@ -1108,11 +1113,11 @@ NOTES
         }
 
         // Mirror the comp's "cut in"/"cut out" markers onto the locked
-        // GUIDE_BURNIN layer. AE prevents editing marker keys on a locked
+        // Guide Burnin layer. AE prevents editing marker keys on a locked
         // layer, so this gives the cut markers UI-level protection on top of
         // the protectedRegion flag (which only guards against time-remap drift).
         function addGuideBurnInMarkers(comp, cutInSec, cutOutSec) {
-            var gl = comp.layers.byName("GUIDE_BURNIN");
+            var gl = comp.layers.byName("Guide Burnin");
             if (!gl) return;
             gl.locked = false;
             var mp = gl.property("Marker");
@@ -2051,7 +2056,11 @@ NOTES
 
         confDlg.add("statictext", undefined, expandedLayers.length + " shot" + (expandedLayers.length !== 1 ? "s" : "") + " will be created:");
 
-        var confLB = confDlg.add("listbox", undefined, [], {
+        var shotsPnl = confDlg.add("panel", undefined, "Shots");
+        shotsPnl.orientation = "column"; shotsPnl.alignChildren = ["fill", "top"];
+        shotsPnl.margins = [10, 12, 10, 10]; shotsPnl.spacing = 4;
+
+        var confLB = shotsPnl.add("listbox", undefined, [], {
             multiselect: true,
             numberOfColumns: 6,
             showHeaders: true,
@@ -2102,7 +2111,7 @@ NOTES
         var confSpacer  = confBtnGrp.add("statictext", undefined, ""); confSpacer.alignment = ["fill", "center"];
         var confToggleOs = confBtnGrp.add("button", undefined, "Toggle Overscan"); confToggleOs.preferredSize = [130, 28];
         var confCancel  = confBtnGrp.add("button", undefined, "Cancel");  confCancel.preferredSize  = [80,  28];
-        var confOk      = confBtnGrp.add("button", undefined, "Process"); confOk.preferredSize      = [100, 28];
+        var confOk      = confBtnGrp.add("button", undefined, "Process"); confOk.preferredSize      = [110, 28];
 
         function toggleOverscanSelection() {
             var sel = confLB.selection;
@@ -2343,6 +2352,16 @@ NOTES
             for (var ei = 1; ei <= proj.numItems; ei++) {
                 if (proj.item(ei) instanceof CompItem) existingCompNames[proj.item(ei).name] = true;
             }
+
+            // Clear the AE render queue so leftover items from prior runs
+            // (partial renders, user-added comps, previous roundtrip passes)
+            // don't co-render with this run's plates. Iterate backward so
+            // the indices stay valid as we remove.
+            try {
+                for (var rqi = proj.renderQueue.numItems; rqi >= 1; rqi--) {
+                    try { proj.renderQueue.item(rqi).remove(); } catch (eRqr) {}
+                }
+            } catch (eRqClr) {}
 
             for (var i = 0; i < expandedLayers.length; i++) {
                 if (cancelCheck()) return;
@@ -2694,7 +2713,7 @@ NOTES
                     } catch(eTrim) {}
 
                     var precompSrc = layer.source;
-                    var blPC = shotComp.layers.byName("GUIDE_BURNIN"); if (blPC) { blPC.locked=false; blPC.moveToBeginning(); blPC.locked=true; }
+                    var blPC = shotComp.layers.byName("Guide Burnin"); if (blPC) { blPC.locked=false; blPC.moveToBeginning(); blPC.locked=true; }
                     containerDurFrames = Math.round(precompSrc.duration * safeFPS);
 
                 } else {
@@ -2779,7 +2798,7 @@ NOTES
                         plateInner.property("Marker").setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
                         containerInner.property("Marker").setValueAtTime(cutStart,               cutMarker("cut in"));
                         containerInner.property("Marker").setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
-                        var blDirect = shotComp.layers.byName("GUIDE_BURNIN");
+                        var blDirect = shotComp.layers.byName("Guide Burnin");
                         if (blDirect) { blDirect.locked = false; blDirect.moveToBeginning(); blDirect.locked = true; }
 
                         // Overscan: containerInner's anchor was set for source-sized
@@ -2848,25 +2867,25 @@ NOTES
 
                 // Lock the raw plate AFTER all marker / timing / effect writes
                 // (both branches above set markers on plateInner). Reimported
-                // variants stack inside the {shot}_plate precomp created below,
+                // variants stack inside the {shot}_stack precomp created below,
                 // not on this layer.
                 try { plateInner.locked = true; } catch (ePL) {}
 
-                // Create the {shot}_plate precomp as a layer at the TOP of
+                // Create the {shot}_stack precomp as a layer at the TOP of
                 // _comp. Sized to clip + handles (matches the reimported
                 // plate.mov that lands inside it post-render), with
                 // displayStartTime carrying the source-TC offset. Reimported
                 // variants (grades, VFX, denoised plates) stack inside it.
-                var platePrecomp = null;
+                var stackComp = null;
                 try {
-                    var plateCompName = shotName + "_plate" + osSuffix;
-                    platePrecomp = proj.items.addComp(
-                        plateCompName, osWidth, osHeight, source.pixelAspect,
+                    var stackCompName = shotName + "_stack" + osSuffix;
+                    stackComp = proj.items.addComp(
+                        stackCompName, osWidth, osHeight, source.pixelAspect,
                         fullDurationSec, shotComp.frameRate
                     );
-                    platePrecomp.displayStartTime = fullStart;
-                    platePrecomp.label = 14; // Cyan — plate precomp
-                    try { platePrecomp.parentFolder = getShotBin(shotBin, "plate"); } catch (ePB) {}
+                    stackComp.displayStartTime = fullStart;
+                    stackComp.label = 14; // Cyan — stack precomp
+                    try { stackComp.parentFolder = shotBin; } catch (ePB) {}
 
                     // Cut in / cut out markers. setValueAtTime on comp.markerProperty
                     // uses the comp's DISPLAYED time (i.e., the time ruler's
@@ -2874,30 +2893,42 @@ NOTES
                     // displayStartTime=fullStart, displayed time == source time,
                     // so pass cutStart / cutStart+cutDuration directly — same
                     // values used for shotComp's markers above.
-                    try { platePrecomp.markerProperty.setValueAtTime(cutStart,               cutMarker("cut in"));  } catch (eMkIn)  {}
-                    try { platePrecomp.markerProperty.setValueAtTime(cutStart + cutDuration, cutMarker("cut out")); } catch (eMkOut) {}
+                    try { stackComp.markerProperty.setValueAtTime(cutStart,               cutMarker("cut in"));  } catch (eMkIn)  {}
+                    try { stackComp.markerProperty.setValueAtTime(cutStart + cutDuration, cutMarker("cut out")); } catch (eMkOut) {}
+
+                    // "Do not modify" notice marker at the very start of the
+                    // stack comp. Sits on the time ruler as a heads-up when
+                    // the artist opens the comp. Protected so AE's own
+                    // time-remap / split-layer operations don't drift it.
+                    try {
+                        var noticeMarker = new MarkerValue(
+                            "Managed by Gegenschuss Shot Roundtrip \u2014 do not modify. Reimported variants land here automatically."
+                        );
+                        noticeMarker.protectedRegion = true;
+                        stackComp.markerProperty.setValueAtTime(fullStart, noticeMarker);
+                    } catch (eNM) {}
 
                     // Outer layer spans fullStart..fullStart+fullDurationSec so
                     // _comp-time = source-time identity still holds (render
                     // queue timeSpanStart, dynamicLink, cut markers rely on it).
-                    var ppLayer = shotComp.layers.add(platePrecomp);
+                    var ppLayer = shotComp.layers.add(stackComp);
                     try { ppLayer.startTime = fullStart; } catch (eST) {}
                     try { ppLayer.inPoint   = fullStart; } catch (eIP) {}
                     try { ppLayer.outPoint  = fullStart + fullDurationSec; } catch (eOP) {}
                     try { ppLayer.moveToBeginning(); } catch (eMB) {}
 
-                    // "Rerender" Checkbox Control effect — user ticks this in
+                    // "Re-render" Checkbox Control effect — user ticks this in
                     // the Effect Controls panel during editing to flag the
                     // shot for re-rendering on the next Re-render Plates run.
                     // Re-render Plates reads + auto-resets this after success.
                     try {
                         var rrEff = ppLayer.Effects.addProperty("ADBE Checkbox Control");
-                        rrEff.name = "Rerender";
+                        rrEff.name = "Re-render";
                     } catch (eRR) {}
 
-                    // GUIDE_BURNIN stays on top — both if/else branches above
+                    // Guide Burnin stays on top — both if/else branches above
                     // already placed it at layer 1; re-assert after our insert.
-                    var blTop = shotComp.layers.byName("GUIDE_BURNIN");
+                    var blTop = shotComp.layers.byName("Guide Burnin");
                     if (blTop) { blTop.locked = false; blTop.moveToBeginning(); blTop.locked = true; }
                 } catch (ePlatePC) {
                     reportError("PLATE-PRECOMP", ePlatePC, "Plate precomp creation failed for " + shotName);
@@ -2921,7 +2952,7 @@ NOTES
                 var pPath = new File(fsShotPlate.fsName + "/" + shotName + "_plate.mov");
                 om.file = pPath;
 
-                renderItems.push({ n: shotName, p: pPath, c: shotComp, s: fullStart, w: osWidth, h: osHeight, cs: cutStart, cd: cutDuration, bin: shotBin, rq: rq, pc: platePrecomp });
+                renderItems.push({ n: shotName, p: pPath, c: shotComp, s: fullStart, w: osWidth, h: osHeight, cs: cutStart, cd: cutDuration, bin: shotBin, rq: rq, pc: stackComp });
 
                 var cutDurationFrames = Math.round(cutDuration * safeFPS);
                 nukeDataList.push({
@@ -2938,7 +2969,8 @@ NOTES
                     w:                       osWidth,
                     h:                       osHeight,
                     origW:                   source.width,
-                    origH:                   source.height
+                    origH:                   source.height,
+                    fps:                     safeFPS
                 });
             }
 
@@ -3051,7 +3083,7 @@ NOTES
                     var tPrecomp = ri.pc;
                     if (tComp instanceof CompItem && tPrecomp instanceof CompItem) {
                         // Reimported {shot}_plate.mov lands INSIDE the
-                        // {shot}_plate precomp at startTime=0 (local-0 of
+                        // {shot}_stack precomp at startTime=0 (local-0 of
                         // the precomp = source-TC fullStart via
                         // displayStartTime). layer.startTime is in LOCAL
                         // time; the render queue's timeSpanStart is the
@@ -3080,7 +3112,7 @@ NOTES
                             if (L.guideLayer) continue;
                             try { L.enabled = false; L.audioEnabled = false; } catch (eEnD) {}
                         }
-                        var bl = tComp.layers.byName("GUIDE_BURNIN"); if (bl) { bl.locked=false; bl.moveToBeginning(); bl.locked=true; }
+                        var bl = tComp.layers.byName("Guide Burnin"); if (bl) { bl.locked=false; bl.moveToBeginning(); bl.locked=true; }
                         importedShots.push(ri.n);
                         count++;
                         cancelStats.rendersDone++;
@@ -3202,7 +3234,7 @@ NOTES
                     for (var nsi = 0; nsi < nukeDataList.length; nsi++) {
                         var nsd = nukeDataList[nsi];
                         var shotNkFile = new File(fsScripts.fsName + "/" + nsd.name + "/" + nsd.name + ".nk");
-                        writeNukeShotScript(shotNkFile, nsd, stats.fps);
+                        writeNukeShotScript(shotNkFile, nsd);
                     }
                 }
 
@@ -3259,14 +3291,14 @@ NOTES
             }
 
             if (missingPlates.length > 0) {
-                var pMiss = rpt.add("panel", undefined, "! Missing Plates (" + missingPlates.length + ")");
+                var pMiss = rpt.add("panel", undefined, "Missing Plates (" + missingPlates.length + ")");
                 pMiss.orientation = "column"; pMiss.alignChildren = ["fill", "top"];
                 pMiss.spacing = 3; pMiss.margins = [10, 15, 10, 10];
                 for (var mi = 0; mi < missingPlates.length; mi++) { pMiss.add("statictext", undefined, missingPlates[mi]); }
             }
 
             if (clampedShots.length > 0) {
-                var pClamp = rpt.add("panel", undefined, "! Handles Clamped");
+                var pClamp = rpt.add("panel", undefined, "Handles Clamped");
                 pClamp.orientation = "column"; pClamp.alignChildren = ["fill", "top"];
                 pClamp.spacing = 4; pClamp.margins = [10, 15, 10, 10];
                 var maxC = Math.min(clampedShots.length, 8);
@@ -3275,7 +3307,7 @@ NOTES
             }
 
             if (skippedLayers.length > 0) {
-                var pWarn = rpt.add("panel", undefined, "! Ignored Layers");
+                var pWarn = rpt.add("panel", undefined, "Ignored Layers");
                 pWarn.orientation = "column"; pWarn.alignChildren = ["fill", "top"];
                 pWarn.spacing = 4; pWarn.margins = [10, 15, 10, 10];
                 var maxS = Math.min(skippedLayers.length, 5);
@@ -3284,7 +3316,7 @@ NOTES
             }
 
             if (dynBuildFails.length > 0) {
-                var pDlErr = rpt.add("panel", undefined, "! dynamicLink Errors (" + dynBuildFails.length + ")");
+                var pDlErr = rpt.add("panel", undefined, "dynamicLink Errors (" + dynBuildFails.length + ")");
                 pDlErr.orientation = "column"; pDlErr.alignChildren = ["fill", "top"];
                 pDlErr.spacing = 4; pDlErr.margins = [10, 15, 10, 10];
                 var maxDE = Math.min(dynBuildFails.length, 8);

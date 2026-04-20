@@ -20,16 +20,16 @@ output:
     {shots}/{shot}/plate/{shot}_{suffix}_OS.mov   (overscan variant)
 
 The file lives next to the original plate so it travels with the shot
-on handoff — Import Renders & Grades' plate-detection picks it up
+on handoff — Import Returns' plate-detection picks it up
 automatically as a plate variant (path contains /plate/).
 
 WORKFLOW
 --------
 1. Run this script. It scans every {shot}_comp (and {shot}_comp_OS)
-   for a {shot}_plate precomp and shows a Confirm Shots dialog so
+   for a {shot}_stack precomp and shows a Confirm Shots dialog so
    you can pick which ones to re-render. Confirmed plates get
    {shot}_{suffix}.mov written next to them.
-2. The rendered file is imported back into the {shot}_plate precomp
+2. The rendered file is imported back into the {shot}_stack precomp
    AND stacked above the original plate — below any renders/grades.
 3. Take the rendered file to the external tool, process it, and
    overwrite in place (keep the filename).
@@ -52,7 +52,7 @@ AE), so the output is the pristine plate — never a grade, render, or
 plate variant. Enabled states are restored via try/finally.
 
 Shot Roundtrip leaves the raw plate flat + locked at the bottom of
-`_comp`. The `{shot}_plate` precomp is created lazily — this script
+`_comp`. The `{shot}_stack` precomp is created lazily — this script
 creates it at import time (first reimport lands inside it) so the
 round-tripped variant stacks in the same container as grades and VFX
 renders.
@@ -83,7 +83,7 @@ and runs in detect-only mode.
         return g;
     };
 
-    var dlg = new Window("dialog", "Gegenschuss Re-render Plates");
+    var dlg = new Window("dialog", "Re-render Plates");
     dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
     dlg.spacing = 10; dlg.margins = 14;
 
@@ -298,19 +298,19 @@ and runs in detect-only mode.
     }
 
     // Derive the plate-precomp name from a _comp name.
-    function plateCompNameFor(compName) {
+    function stackCompNameFor(compName) {
         return compName.replace(/_comp(_OS)?$/i, function (_m, os) {
-            return "_plate" + (os || "");
+            return "_stack" + (os || "");
         });
     }
 
-    // Ensure a {shot}_plate precomp exists as a layer at the TOP of `comp`.
+    // Ensure a {shot}_stack precomp exists as a layer at the TOP of `comp`.
     // Empty on first creation — holds only reimported variants (grades, VFX,
     // denoised plates). Raw plate stays flat + locked at the bottom of `comp`.
-    // Mirror of import_renders.jsx's ensurePlatePrecomp so Re-render Plates can
+    // Mirror of import_renders.jsx's ensureStack so Re-render Plates can
     // land its output in the same place. readOnly returns null if missing.
-    function ensurePlatePrecomp(comp, shotName, readOnly) {
-        var targetName = plateCompNameFor(comp.name);
+    function ensureStack(comp, shotName, readOnly) {
+        var targetName = stackCompNameFor(comp.name);
         for (var i = 1; i <= comp.numLayers; i++) {
             var L = comp.layer(i);
             try {
@@ -348,8 +348,8 @@ and runs in detect-only mode.
     }
 
     // Confirm Shots preflight: lets the user toggle which shots to re-render.
-    // Pre-check logic — if any plate precomps are flagged (red label in AE's
-    // Project panel), default-check only those; otherwise default-check all
+    // Pre-check logic — if any stack precomps are flagged via their Re-render
+    // checkbox effect, default-check only those; otherwise default-check all
     // (classic opt-out). User can still toggle any row with Space or the
     // Toggle button. Mirrors shot_roundtrip.jsx's Confirm Shots pattern.
     function showConfirmDialog(plan) {
@@ -369,11 +369,11 @@ and runs in detect-only mode.
         if (anyFlagged) {
             win.add("statictext", undefined,
                 flagCount + " shot" + (flagCount === 1 ? "" : "s")
-                + " flagged via the Rerender checkbox on the plate precomp layer \u2014 only those are pre-checked."
+                + " flagged via the Re-render checkbox on the stack precomp layer \u2014 only those are pre-checked."
                 + " Flags auto-reset after a successful re-render.");
         } else {
             win.add("statictext", undefined,
-                "Tip: tick the \u201cRerender\u201d Checkbox Control on a {shot}_plate precomp layer "
+                "Tip: tick the \u201cRe-render\u201d Checkbox Control on a {shot}_stack precomp layer "
                 + "(Effect Controls panel) during editing to flag it for re-render on the next run.");
         }
 
@@ -392,7 +392,11 @@ and runs in detect-only mode.
         var outW   = Math.max(Math.min(outMax   * 7 + 24, 400), 180);
         var checkW = 60, flagW = 50, framesW = 70;
 
-        var lb = win.add("listbox", undefined, [], {
+        var shotsPnl = win.add("panel", undefined, "Shots");
+        shotsPnl.orientation = "column"; shotsPnl.alignChildren = ["fill", "top"];
+        shotsPnl.margins = [10, 12, 10, 10]; shotsPnl.spacing = 4;
+
+        var lb = shotsPnl.add("listbox", undefined, [], {
             multiselect: true,
             numberOfColumns: 6,
             showHeaders: true,
@@ -412,9 +416,9 @@ and runs in detect-only mode.
             item.subItems[0].text = plan[pi].flagged ? "\u25cf" : "";
             item.subItems[1].text = plan[pi].shotName + (plan[pi].isOS ? " [OS]" : "");
             item.subItems[2].text = (plan[pi].plateLayer.source && plan[pi].plateLayer.source.name) ? plan[pi].plateLayer.source.name : "?";
-            // Render span = plate precomp's full duration (clip + handles).
-            var fr = plan[pi].platePrecomp.frameRate;
-            var pDur = 0; try { pDur = plan[pi].platePrecomp.duration; } catch (eWA) {}
+            // Render span = stack precomp's full duration (clip + handles).
+            var fr = plan[pi].stackComp.frameRate;
+            var pDur = 0; try { pDur = plan[pi].stackComp.duration; } catch (eWA) {}
             var frames = (fr > 0 && pDur > 0) ? Math.round(pDur * fr) : 0;
             item.subItems[3].text = String(frames);
             item.subItems[4].text = plan[pi].outFile.name;
@@ -515,22 +519,22 @@ and runs in detect-only mode.
     }
 
     // ── Main ──────────────────────────────────────────────────────────────────
-    // Users flag a shot for re-render via a "Rerender" Checkbox Control effect
-    // on the plate precomp layer in _comp. The Confirm dialog below pre-checks
+    // Users flag a shot for re-render via a "Re-render" Checkbox Control effect
+    // on the stack precomp layer in _comp. The Confirm dialog below pre-checks
     // only flagged shots if any exist; otherwise all rows default-checked.
     // Successfully re-rendered shots get their checkbox auto-reset so the flag
     // doesn't linger into the next run.
-    var RR_EFFECT_NAME = "Rerender";
+    var RR_EFFECT_NAME = "Re-render";
 
-    // Read the Rerender checkbox on the {shot}_plate outer layer in comp.
-    // Returns false when there's no plate precomp yet, no effect, or the
+    // Read the Re-render checkbox on the {shot}_stack outer layer in comp.
+    // Returns false when there's no stack precomp yet, no effect, or the
     // checkbox is unchecked. Never throws.
     function rerenderFlagOn(comp) {
         for (var i = 1; i <= comp.numLayers; i++) {
             var L = comp.layer(i);
             try {
                 if (!(L.source instanceof CompItem)) continue;
-                if (!/_plate(_OS)?$/i.test(L.source.name)) continue;
+                if (!/_stack(_OS)?$/i.test(L.source.name)) continue;
                 var eff = L.Effects.property(RR_EFFECT_NAME);
                 if (!eff) return false;
                 var cb = eff.property(1);  // index 1 = the Checkbox parameter (locale-safe)
@@ -541,14 +545,14 @@ and runs in detect-only mode.
         return false;
     }
 
-    // Reset the Rerender checkbox on the {shot}_plate outer layer after a
+    // Reset the Re-render checkbox on the {shot}_stack outer layer after a
     // successful re-render. Silent no-op if the effect is missing.
     function rerenderFlagReset(comp) {
         for (var i = 1; i <= comp.numLayers; i++) {
             var L = comp.layer(i);
             try {
                 if (!(L.source instanceof CompItem)) continue;
-                if (!/_plate(_OS)?$/i.test(L.source.name)) continue;
+                if (!/_stack(_OS)?$/i.test(L.source.name)) continue;
                 var eff = L.Effects.property(RR_EFFECT_NAME);
                 if (!eff) return;
                 var cb = eff.property(1);  // index 1 = the Checkbox parameter (locale-safe)
@@ -567,7 +571,7 @@ and runs in detect-only mode.
     // still cancel at the Confirm dialog below with nothing touched.
     var dryRunLog  = [];
     var errorLog   = [];
-    var renderPlan = [];  // { comp, platePrecomp, plateLayer, outFile, shotName, isOS }
+    var renderPlan = [];  // { comp, stackComp, plateLayer, outFile, shotName, isOS }
 
     try {
         for (var ci = 0; ci < shotComps.length; ci++) {
@@ -575,32 +579,32 @@ and runs in detect-only mode.
             var shotName = shotNameFromComp(comp.name);
             var isOS     = isOvercan(comp.name);
 
-            // Render target: _comp, with only the {shot}_plate precomp layer
+            // Render target: _comp, with only the {shot}_stack precomp layer
             // enabled. This bakes any effects the user applied to the plate-
             // precomp layer (degrain, stabilize, etc.) into the output. After
             // import we disable those effects on the layer so the next pass
             // doesn't double-apply. Need references to: the precomp (for the
             // reimport destination), the outer precomp layer in _comp (for
             // solo + FX disable), and the plate inside (display only).
-            var platePrecomp = ensurePlatePrecomp(comp, shotName, true);
-            if (!platePrecomp) {
+            var stackComp = ensureStack(comp, shotName, true);
+            if (!stackComp) {
                 errorLog.push(shotName + (isOS ? " [OS]" : "")
-                    + ": no " + shotName + "_plate precomp (re-run Shot Roundtrip); skipped.");
+                    + ": no " + shotName + "_stack precomp (re-run Shot Roundtrip); skipped.");
                 continue;
             }
             var ppOuter = null;
             for (var oi = 1; oi <= comp.numLayers; oi++) {
-                try { if (comp.layer(oi).source === platePrecomp) { ppOuter = comp.layer(oi); break; } } catch (eOi) {}
+                try { if (comp.layer(oi).source === stackComp) { ppOuter = comp.layer(oi); break; } } catch (eOi) {}
             }
             if (!ppOuter) {
                 errorLog.push(shotName + (isOS ? " [OS]" : "")
-                    + ": " + platePrecomp.name + " has no matching layer in " + comp.name + "; skipped.");
+                    + ": " + stackComp.name + " has no matching layer in " + comp.name + "; skipped.");
                 continue;
             }
-            var srcPlate = findTopmostPlateLike(platePrecomp);
+            var srcPlate = findTopmostPlateLike(stackComp);
             if (!srcPlate) {
                 errorLog.push(shotName + (isOS ? " [OS]" : "")
-                    + ": " + platePrecomp.name + " has no plate-like layer inside; skipped.");
+                    + ": " + stackComp.name + " has no plate-like layer inside; skipped.");
                 continue;
             }
 
@@ -611,7 +615,7 @@ and runs in detect-only mode.
 
             if (dryRun) {
                 dryRunLog.push(shotName + (isOS ? " [OS]" : "") + ": "
-                    + "would render " + comp.name + " (solo " + platePrecomp.name + ") \u2192 " + outFile.fsName
+                    + "would render " + comp.name + " (solo " + stackComp.name + ") \u2192 " + outFile.fsName
                     + " (plate: " + srcPlate.source.name + ")"
                     + (flagged ? " [flagged]" : ""));
                 continue;
@@ -619,8 +623,8 @@ and runs in detect-only mode.
 
             renderPlan.push({
                 comp:             comp,
-                platePrecomp:     platePrecomp,
-                platePrecompLayer: ppOuter,
+                stackComp:     stackComp,
+                stackLayer: ppOuter,
                 plateLayer:       srcPlate,
                 outFile:          outFile,
                 shotName:         shotName,
@@ -692,12 +696,12 @@ and runs in detect-only mode.
                     enabled: L.enabled,
                     audio:   L.audioEnabled
                 });
-                if (L !== rp.platePrecompLayer && !L.guideLayer) {
+                if (L !== rp.stackLayer && !L.guideLayer) {
                     try { L.enabled = false; } catch (eEn) {}
                     try { L.audioEnabled = false; } catch (eAu) {}
                 }
             }
-            try { rp.platePrecompLayer.enabled = true; } catch (ePE) {}
+            try { rp.stackLayer.enabled = true; } catch (ePE) {}
             rp.restoreStates = restoreStates;
         }
     } finally {
@@ -705,6 +709,14 @@ and runs in detect-only mode.
     }
 
     // ── Queue renders ─────────────────────────────────────────────────────────
+    // Clear leftover items (previous runs, user-added comps) so only this
+    // run's plates render. Iterate backward to keep indices valid on remove.
+    try {
+        for (var rqi = proj.renderQueue.numItems; rqi >= 1; rqi--) {
+            try { proj.renderQueue.item(rqi).remove(); } catch (eRqr) {}
+        }
+    } catch (eRqClr) {}
+
     var queueErrors = [];
     for (var qi = 0; qi < renderPlan.length; qi++) {
         var entry = renderPlan[qi];
@@ -753,7 +765,7 @@ and runs in detect-only mode.
         errorLog.push("RESTORE: " + eRestore.message);
     }
 
-    // ── Import rendered plates back into the _plate precomp ───────────────────
+    // ── Import rendered plates back into the _stack precomp ──────────────────
     var imported = 0;
     var reloaded = 0;
     var skipped  = 0;
@@ -792,30 +804,30 @@ and runs in detect-only mode.
             }
 
             // Reimported variant goes back inside the same precomp we rendered.
-            if (isFootageInComp(ent.platePrecomp, footageItem)) {
+            if (isFootageInComp(ent.stackComp, footageItem)) {
                 skipped++;
                 continue;
             }
             try {
-                var newLayer = ent.platePrecomp.layers.add(footageItem);
+                var newLayer = ent.stackComp.layers.add(footageItem);
                 // Precomp duration == render duration, so the new layer at
                 // startTime=0 fills it exactly (precomp-time 0 == source-TC
                 // fullStart via displayStartTime).
                 try { newLayer.startTime = 0; } catch (eST) {}
-                newLayer.position.setValue([ent.platePrecomp.width / 2, ent.platePrecomp.height / 2]);
+                newLayer.position.setValue([ent.stackComp.width / 2, ent.stackComp.height / 2]);
                 newLayer.label = 12;
                 // Plate variants sit above existing plate-like layers but
                 // below any renders/grades — matches import_renders.jsx's
                 // stack-above-topmost-plate-like convention.
-                var plateTop = findTopmostPlateLike(ent.platePrecomp);
+                var plateTop = findTopmostPlateLike(ent.stackComp);
                 if (plateTop && plateTop !== newLayer) {
                     try { newLayer.moveBefore(plateTop); } catch (eMv) {}
                 }
                 // Disable every non-guide layer BELOW the new variant so the
                 // fresh render becomes the active plate. Earlier variants stay
                 // in the stack (user can re-enable if they want to roll back).
-                for (var lb = newLayer.index + 1; lb <= ent.platePrecomp.numLayers; lb++) {
-                    var bL = ent.platePrecomp.layer(lb);
+                for (var lb = newLayer.index + 1; lb <= ent.stackComp.numLayers; lb++) {
+                    var bL = ent.stackComp.layer(lb);
                     if (bL.guideLayer) continue;
                     try { bL.enabled      = false; } catch (eDisE) {}
                     try { bL.audioEnabled = false; } catch (eDisA) {}
@@ -824,11 +836,11 @@ and runs in detect-only mode.
                 // Disable every effect on the plate-precomp layer in _comp —
                 // they've been baked into the newly-rendered variant, so
                 // leaving them live would double-apply on the next pass (e.g.
-                // degraining the already-degrained plate). Keep the "Rerender"
+                // degraining the already-degrained plate). Keep the "Re-render"
                 // Checkbox Control so the flag UX still works.
-                if (ent.platePrecompLayer) {
+                if (ent.stackLayer) {
                     try {
-                        var effs = ent.platePrecompLayer.Effects;
+                        var effs = ent.stackLayer.Effects;
                         for (var ei = 1; ei <= effs.numProperties; ei++) {
                             var eff = effs.property(ei);
                             if (eff && eff.name === RR_EFFECT_NAME) continue;
@@ -841,7 +853,7 @@ and runs in detect-only mode.
                     + ": failed to add layer — " + eAdd.message);
             }
 
-            // Auto-reset the Rerender checkbox on success so the flag doesn't
+            // Auto-reset the Re-render checkbox on success so the flag doesn't
             // linger into the next run. Silent no-op if the effect is missing.
             if (ent.flagged) { rerenderFlagReset(ent.comp); }
         }

@@ -18,30 +18,21 @@ returns from two sources:
   2. a flat {shots}/_grade/ folder  – Resolve-graded returns (optional),
                                       matched to shots by filename prefix
 
-Per shot, the script ensures a {shot}_plate precomp exists inside
-{shot}_comp. On first run it auto-creates it by pre-composing the hero
-plate layer with "Leave all attributes in the original composition" —
-every effect, transform, mask, and keyframe on the hero stays on the
-OUTER layer in _comp, while only the raw plate source moves into the
-new precomp. The new precomp is filed under the shot's plate/ bin.
+Per shot, the script ensures a {shot}_stack precomp exists inside
+{shot}_comp (Shot Roundtrip creates it; this tool lazy-creates it if
+missing). All reimported variants — grades, VFX renders, denoised
+plate variants — stack inside that precomp. The raw plate stays flat
++ locked at the bottom of _comp and is NEVER inside the stack.
 
-All imported renders and grades are added INSIDE that precomp, with a
-fixed category order:
+Stacking order inside {shot}_stack:
 
     Top  →  grade   (from _grade/, matched by filename prefix)
             render  (from {shot}/render/)
-            plate   (enabled state is never touched — you manage it)
+            plate   (variants from Re-render Plates, if any)
 
-Within each category the newest file wins; older versions are imported
-but disabled. Category order is fixed, so a VFX re-render after a grade
-does not cover the grade. Since the hero layer's effects live on the
-OUTER layer, not the inner sources, swapping the visible source inside
-the precomp never duplicates or misaligns any look work.
-
-Migration note: if a comp was previously processed by an older version
-of this script (flat layers stacked directly in _comp), those pre-
-existing layers are left in place on first run. New imports go into
-the new _plate precomp. Consolidate manually if desired.
+Each new import becomes the topmost layer within its category; layers
+below it get disabled so only the freshest one is visible. Users can
+re-enable older variants manually for comparison / rollback.
 
 NAMING CONVENTION (STRICT)
 --------------------------
@@ -75,7 +66,7 @@ optional flat _grade/ folder for Resolve returns:
 (function () {
 
     var proj = app.project;
-    if (!proj || !proj.file) { alert("Import Renders & Grades: save the project first."); return; }
+    if (!proj || !proj.file) { alert("Import Returns: save the project first."); return; }
 
     // ── UI ────────────────────────────────────────────────────────────────────
     var LABEL_W = 120; var FIELD_H = 22;
@@ -88,7 +79,7 @@ optional flat _grade/ folder for Resolve returns:
         return g;
     };
 
-    var dlg = new Window("dialog", "Gegenschuss Import Renders & Grades");
+    var dlg = new Window("dialog", "Import Returns");
     dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
     dlg.spacing = 10; dlg.margins = 14;
 
@@ -125,7 +116,7 @@ optional flat _grade/ folder for Resolve returns:
     // Shots Folder and File Filter get round-tripped through app.settings.
     // Dry Run (debug) isn't persisted. Reset restores defaults in the fields
     // without saving until the user clicks Import.
-    var IR_SECTION  = "Gegenschuss Import Renders";
+    var IR_SECTION  = "Gegenschuss Import Returns";
     var IR_DEFAULTS = {
         shotsFolder:    "../Roundtrip",
         fileFilter:     "*.mov"
@@ -153,7 +144,7 @@ optional flat _grade/ folder for Resolve returns:
     var btnReset  = btnGrp.add("button", undefined, "Reset to Defaults"); btnReset.preferredSize  = [130, 28];
     var btnCancel = btnGrp.add("button", undefined, "Cancel");            btnCancel.preferredSize = [80, 28];
     var btnSpacer = btnGrp.add("statictext", undefined, "");              btnSpacer.alignment = ["fill", "center"];
-    var btnOk     = btnGrp.add("button", undefined, "Import Renders & Grades"); btnOk.preferredSize = [140, 28];
+    var btnOk     = btnGrp.add("button", undefined, "Import Returns"); btnOk.preferredSize = [130, 28];
 
     btnReset.onClick  = function () { irApply(IR_DEFAULTS); };
     btnOk.onClick     = function () {
@@ -380,37 +371,37 @@ optional flat _grade/ folder for Resolve returns:
             next++;
         }
         if (!newFile) {
-            alert("Import Renders & Grades: could not find an unused version number for the backup copy.\nAborting so nothing is modified.");
+            alert("Import Returns: could not find an unused version number for the backup copy.\nAborting so nothing is modified.");
             return null;
         }
         try {
             proj.save();
             proj.save(newFile);
         } catch (eSave) {
-            alert("Import Renders & Grades: failed to save versioned copy —\n" + eSave.message +
+            alert("Import Returns: failed to save versioned copy —\n" + eSave.message +
                   "\n\nAborting so the original file stays untouched.");
             return null;
         }
         return newFile;
     }
 
-    // Derive the plate-precomp name from a _comp name.
-    //   "KM_010_comp"    → "KM_010_plate"
-    //   "KM_010_comp_OS" → "KM_010_plate_OS"
-    function plateCompNameFor(compName) {
+    // Derive the stack-precomp name from a _comp name.
+    //   "KM_010_comp"    → "KM_010_stack"
+    //   "KM_010_comp_OS" → "KM_010_stack_OS"
+    function stackCompNameFor(compName) {
         return compName.replace(/_comp(_OS)?$/i, function (_m, os) {
-            return "_plate" + (os || "");
+            return "_stack" + (os || "");
         });
     }
 
-    // Ensure a {shot}_plate precomp exists as a layer at the TOP of `comp`,
+    // Ensure a {shot}_stack precomp exists as a layer at the TOP of `comp`,
     // and return its CompItem. The precomp is empty on first creation — it
     // holds reimported variants only (grades, VFX renders, denoised plate
     // variants). The raw plate stays flat + locked at the bottom of `comp`,
     // never touched. Returns null in readOnly (dry-run) mode when the precomp
     // doesn't exist yet, so the caller can log "would create".
-    function ensurePlatePrecomp(comp, shotName, readOnly) {
-        var targetName = plateCompNameFor(comp.name);
+    function ensureStack(comp, shotName, readOnly) {
+        var targetName = stackCompNameFor(comp.name);
         // Already exists?
         for (var i = 1; i <= comp.numLayers; i++) {
             var L = comp.layer(i);
@@ -485,7 +476,7 @@ optional flat _grade/ folder for Resolve returns:
         if (!versionedFile) return;   // aborted; original untouched
     }
 
-    if (!dryRun) app.beginUndoGroup("Import Renders & Grades");
+    if (!dryRun) app.beginUndoGroup("Import Returns");
     try {
 
         // Two return sources per comp:
@@ -545,22 +536,22 @@ optional flat _grade/ folder for Resolve returns:
             var comp     = shotComps[ci];
             var shotName = shotNameFromComp(comp.name);
             // Skip shots with no files queued to import — don't create empty
-            // {shot}_plate precomps just because Import Renders was run.
+            // {shot}_stack precomps just because Import Returns was run.
             var hasAnyFiles = false;
             for (var ck = 0; ck < CATEGORIES.length; ck++) {
                 if (filesForCategory(CATEGORIES[ck], shotName).length > 0) { hasAnyFiles = true; break; }
             }
             if (!hasAnyFiles) continue;
 
-            // {shot}_plate precomp holds all reimported variants (grades, VFX
+            // {shot}_stack precomp holds all reimported variants (grades, VFX
             // renders, denoised plate variants). Lazy-created the first time
             // any variant is imported — the raw plate stays flat + locked at
             // the bottom of _comp and is NEVER inside the precomp.
-            var platePrecomp = ensurePlatePrecomp(comp, shotName, dryRun);
-            var importTarget = platePrecomp || comp;  // dry-run fallback for log/alignment
-            if (dryRun && !platePrecomp) {
+            var stackComp = ensureStack(comp, shotName, dryRun);
+            var importTarget = stackComp || comp;  // dry-run fallback for log/alignment
+            if (dryRun && !stackComp) {
                 dryRunLog.push(shotName + " [precomp]: would create "
-                    + plateCompNameFor(comp.name));
+                    + stackCompNameFor(comp.name));
             }
             // Raw plate always lives in `_comp` (locked by Shot Roundtrip).
             // The precomp holds only reimported variants. Find the hero plate
@@ -700,23 +691,23 @@ optional flat _grade/ folder for Resolve returns:
             // Plate enabled-state is intentionally NOT touched. The user
             // manages plate visibility manually so they can verify the
             // import before hiding the source — see the README "Tools →
-            // Import Renders & Grades" block for the reasoning.
+            // Import Returns" block for the reasoning.
 
-            // Keep GUIDE_BURNIN on top. Lives on the outer shotComp; the
-            // inner _plate precomp has no burn-in, so look up on comp.
-            var bl = comp.layers.byName("GUIDE_BURNIN");
+            // Keep Guide Burnin on top. Lives on the outer shotComp; the
+            // inner _stack precomp has no burn-in, so look up on comp.
+            var bl = comp.layers.byName("Guide Burnin");
             if (bl) { bl.locked = false; bl.moveToBeginning(); bl.locked = true; }
 
             if (addedAny) compsWithNewRenders.push(shotName);
         }
 
     } catch (e) {
-        alert("Import Renders & Grades error:\n" + e.message + "\nLine: " + e.line);
+        alert("Import Returns error:\n" + e.message + "\nLine: " + e.line);
     }
     if (!dryRun) app.endUndoGroup();
 
     // ── Summary ───────────────────────────────────────────────────────────────
-    var title = dryRun ? "Import Renders & Grades — Dry Run" : "Import Renders & Grades Complete";
+    var title = dryRun ? "Import Returns — Dry Run" : "Import Returns Complete";
 
     var msg = "Comps scanned:       " + shotComps.length + "\n"
             + "Comps with renders:  " + statsComps + "\n"

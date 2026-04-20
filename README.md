@@ -102,7 +102,7 @@ Every tool in this panel is a step in the same round trip:
 1. **Edit in Premiere**, move to After Effects once the edit is close to locked.
 2. Select layers in the edit comp, run **Shot Roundtrip**. Plates render out with handles, optionally creating Nuke scripts, Shot XML, and Dynamic Link comps.
 3. **External work** — compositing in Nuke, tracking in SynthEyes, 3D in Houdini. Color grading in Resolve via the exported Shot XML.
-4. Run **Import Renders & Grades** to pull finished VFX *and* Resolve-graded renders back into the AE shot comps. Grades stack above VFX, VFX above plate — so the topmost enabled layer is always the most finished version.
+4. Run **Import Returns** to pull finished VFX *and* Resolve-graded renders back into the AE shot comps. Grades stack above VFX, VFX above plate — so the topmost enabled layer is always the most finished version.
 5. In Premiere, import the Dynamic Link comps and run **Trim Handles & Close Gaps** to reconstruct the edit.
 6. **Finish in Premiere** — audio, titles, delivery. (Color is finalized upstream in Resolve; Premiere just carries the graded result through Dynamic Link.)
 
@@ -144,13 +144,13 @@ work is underway. The pipeline is designed around this:
 >    automatically and sandwiches new layers between the existing
 >    shots' time positions in mainComp — uncheck Auto to set Start
 >    Number + Increment manually.
-> 3. **Never rename `_comp` compositions.** Tools like `Import Renders & Grades`
+> 3. **Never rename `_comp` compositions.** Tools like `Import Returns`
 >    and `Export Shot XML` derive the disk path from the comp name
 >    (`{prefix}_010_comp` → `{shots}/{prefix}_010/`). Comps without the
 >    `_comp` suffix are silently ignored.
 > 4. **Never move the plate layer's in-point.** Shot Roundtrip locks the
 >    raw plate at the bottom of `_comp`. Reimported variants stack in a
->    `{shot}_plate` precomp above it. Render imports and re-render passes
+>    `{shot}_stack` precomp above it. Render imports and re-render passes
 >    locate the raw plate by tag and align to its start time — shifting
 >    it misaligns every VFX return.
 
@@ -270,7 +270,7 @@ work is underway. The pipeline is designed around this:
   before. Cancelling here leaves the project pristine, same as
   cancelling at Confirm Shots.
 
-- **Import Renders & Grades** — Scans all `*_comp` compositions in the
+- **Import Returns** — Scans all `*_comp` compositions in the
   project and imports finished returns from two sources:
 
   1. **VFX renders** — each shot's own `{shots}/{shot}/render/` folder.
@@ -303,16 +303,16 @@ work is underway. The pipeline is designed around this:
   don't belong in that handoff, so they live in a separate flat archive
   at the shots root. Handed-off shot folders stay clean.
 
-  **Plate precomp layout:** Shot Roundtrip locks the raw plate at the
-  bottom of `_comp` and leaves it flat. It also creates an empty
-  `{shot}_plate` precomp as a layer at the TOP of `_comp` (above the
-  locked raw plate). All reimported variants live inside that precomp —
-  grades on top, VFX renders in the middle, plate variants at the
-  bottom — with only the topmost enabled per category. The raw plate
-  itself is never moved into the precomp. Import Renders & Grades will
-  re-create the precomp if missing (legacy projects) as a fallback.
+  **Stack precomp layout:** Shot Roundtrip locks the raw plate at the
+  bottom of `_comp` and leaves it flat. It also creates a `{shot}_stack`
+  precomp as a layer at the TOP of `_comp` (above the locked raw plate),
+  sized to clip + handles with the source-TC offset on `displayStartTime`.
+  All reimported variants live inside that precomp — grades on top, VFX
+  renders in the middle, plate variants at the bottom — with only the
+  topmost enabled per category. The raw plate itself is never moved into
+  the precomp.
 
-  <img src="docs/import_renders.png" width="340" alt="Import Renders & Grades dialog">
+  <img src="docs/import_renders.png" width="340" alt="Import Returns dialog">
 
 - **Re-render Plates** — Re-renders selected shots' original plates to a
   new filename, ready to be handed to an external tool (Neat Video, a
@@ -342,19 +342,16 @@ work is underway. The pipeline is designed around this:
   4. Queues each `_comp` for render over its workArea (the clip +
      handles span set by Shot Roundtrip), so `{shot}_{suffix}.mov` has
      exactly the frames external tools need.
-  5. After render, imports each rendered file back. If the `{shot}_plate`
-     precomp doesn't exist yet (first reimport for that shot), it's
-     created empty at the top of `_comp`. The variant lands inside that
-     precomp, above any existing plate-like layers — matches Import
-     Renders & Grades' "renders stack above the topmost plate-like
-     layer" rule, so the new variant becomes the active plate for
-     future re-renders/imports without disturbing the rest of the stack.
+  5. After render, imports each rendered file back into the
+     `{shot}_stack` precomp (above any existing plate-like layers). The
+     new variant becomes the active plate for future re-renders /
+     imports without disturbing the rest of the stack.
 
   **External roundtrip:** take `{shot}_{suffix}.mov` into your external
   tool, process it, and **overwrite the file in place** (keep the same
   filename). Back in AE, select the imported footage item and
   `File → Reload Footage` — the processed pixels appear instantly in
-  every `_plate` precomp that references it, and the VFX + grade stack
+  every `_stack` precomp that references it, and the VFX + grade stack
   above keeps working as-is.
 
   The script version-bumps the `.aep` on Confirm (after the preflight,
@@ -366,10 +363,10 @@ work is underway. The pipeline is designed around this:
 
 - **Export Shot XML** — Exports an FCPXML 1.8 timeline of all `*_comp`
   compositions for import into DaVinci Resolve. For each comp, the active
-  footage layer is picked to match whichever layout Import Renders & Grades
+  footage layer is picked to match whichever layout Import Returns
   has written:
 
-  - If `_comp` contains a `{shot}_plate` precomp (the current layout), the
+  - If `_comp` contains a `{shot}_stack` precomp (the current layout), the
     export recurses into it and uses the topmost enabled footage layer
     there — naturally the newest grade if present, else the newest VFX
     render, else the plate.
@@ -397,7 +394,7 @@ work is underway. The pipeline is designed around this:
   (`_grade_v01`). Before every new delivery pass, bump `_v01` → `_v02` in
   the preset — never overwrite, so older looks stay recoverable.
 
-  Import Renders & Grades picks these up automatically; the shot-prefix
+  Import Returns picks these up automatically; the shot-prefix
   matcher works on compound names at the first non-alphanumeric boundary.
 
 ### SynthEyes
@@ -549,7 +546,7 @@ output at `{shots}/{shot}/render/` and make sure the filename starts
 with the shot name — the rest is automatic.
 
 **Do I need to create the `_grade/` folder myself?**
-No. Import Renders & Grades creates `Roundtrip/_grade/` the first
+No. Import Returns creates `Roundtrip/_grade/` the first
 time you run it, with a `README.txt` describing the Resolve Deliver
 preset and filename convention. No grades yet? Fine — only VFX
 renders get imported, everything else keeps working.

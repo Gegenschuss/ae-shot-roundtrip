@@ -14,14 +14,14 @@
  * XML matching Premiere Pro's export format, which DaVinci Resolve
  * imports reliably.
  *
- * Two layouts are supported (matching Import Renders & Grades):
+ * Two layouts are supported (matching Import Returns):
  *
  *   1. FLAT — footage sits directly in {shot}_comp. We pick the topmost
  *      enabled footage layer whose name starts with the shot number
  *      (e.g. "KM_050_plate_v02.mov" in comp "KM_050_comp").
  *
- *   2. PRECOMP — {shot}_comp contains a {shot}_plate precomp created by
- *      Import Renders & Grades. Inside that precomp, the stack order is
+ *   2. PRECOMP — {shot}_comp contains a {shot}_stack precomp created by
+ *      Shot Roundtrip. Inside that precomp, the stack order is
  *      grade (top) → render → plate (bottom), and the importer disables
  *      older files within each category. We recurse into the precomp
  *      and pick the topmost enabled footage layer there — naturally the
@@ -303,9 +303,9 @@
 
     /**
      * Return the topmost enabled footage layer inside a precomp. No
-     * shot-name filter — by construction the {shot}_plate precomp only
-     * holds plate/render/grade variants of this shot. Import Renders &
-     * Grades keeps the stack ordered grade → render → plate top-to-bottom
+     * shot-name filter — by construction the {shot}_stack precomp only
+     * holds plate/render/grade variants of this shot. Import Returns
+     * keeps the stack ordered grade → render → plate top-to-bottom
      * and disables older files within each category, so "topmost enabled
      * footage" resolves to the most-finished visible version.
      */
@@ -321,9 +321,9 @@
 
     /**
      * Return the active footage layer for a shot comp. Supports both
-     * layouts written by Import Renders & Grades:
+     * layouts written by Import Returns:
      *
-     *   - PRECOMP: a {shot}_plate precomp layer lives directly in _comp
+     *   - PRECOMP: a {shot}_stack precomp layer lives directly in _comp
      *     as the hero. We recurse into it and pick the topmost enabled
      *     footage layer inside — naturally the newest grade, else the
      *     newest VFX render, else the plate itself.
@@ -344,7 +344,7 @@
             if (!layer.enabled) continue;
             if (!layer.source) continue;
             if (layer.source instanceof CompItem &&
-                /_plate(_OS)?$/i.test(layer.source.name) &&
+                /_stack(_OS)?$/i.test(layer.source.name) &&
                 shotRe.test(layer.source.name)) {
                 var inner = pickTopmostFootageLayerInPrecomp(layer.source);
                 if (inner) return inner;

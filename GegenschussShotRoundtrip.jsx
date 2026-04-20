@@ -35,15 +35,15 @@
         },
         {
             group:  "Roundtrip",
-            label:  "Import Renders & Grades",
-            tip:    "Scan all *_comp compositions for VFX renders (in each shot's render/ folder) and Resolve grades (in the flat _grade/ folder), and import them back into the project stacked grade > render > plate.",
-            file:   "import-renders/import_renders.jsx"
+            label:  "Re-render Plates",
+            tip:    "Re-render every shot's original plate to {shot}_{suffix}.mov ready for external denoising or stabilization, and import the results back into each _stack precomp as plate variants.",
+            file:   "re-render-plates/re_render_plates.jsx"
         },
         {
             group:  "Roundtrip",
-            label:  "Re-render Plates",
-            tip:    "Re-render every shot's original plate to {shot}_{suffix}.mov (default suffix: denoised) ready for external denoising or stabilization, and import the results back into each _plate precomp as plate variants.",
-            file:   "re-render-plates/re_render_plates.jsx"
+            label:  "Import Returns",
+            tip:    "Scan all *_comp compositions for VFX renders (in each shot's render/ folder) and Resolve grades (in the flat _grade/ folder), and import them back into the project stacked grade > render > plate.",
+            file:   "import-renders/import_renders.jsx"
         },
         {
             group:  "SynthEyes",

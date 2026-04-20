@@ -94,9 +94,9 @@ function writeGradeReadme(folder) {
         "Resolve grades - how to use this folder\n" +
         "=========================================\n" +
         "\n" +
-        "Drop DaVinci Resolve-graded clips here. The AE \"Import Renders\n" +
-        "& Grades\" script scans this folder and matches files back to\n" +
-        "their shot comps by filename prefix.\n" +
+        "Drop DaVinci Resolve-graded clips here. The AE \"Import Returns\"\n" +
+        "script scans this folder and matches files back to their shot\n" +
+        "comps by filename prefix.\n" +
         "\n" +
         "Naming convention\n" +
         "-----------------\n" +
@@ -126,8 +126,8 @@ function writeGradeReadme(folder) {
         "\n" +
         "IMPORTANT - DO NOT RENAME this folder.\n" +
         "--------------------------------------\n" +
-        "The name \"_grade\" is hard-coded in the Import Renders &\n" +
-        "Grades script. Renaming it silently breaks grade import.\n" +
+        "The name \"_grade\" is hard-coded in the Import Returns script.\n" +
+        "Renaming it silently breaks grade import.\n" +
         "\n" +
         "Safe to delete the folder entirely if you don't use Resolve\n" +
         "grades -- the script will recreate it on the next run.\n" +
