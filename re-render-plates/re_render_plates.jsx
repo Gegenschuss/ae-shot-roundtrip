@@ -25,8 +25,10 @@ automatically as a plate variant (path contains /plate/).
 
 WORKFLOW
 --------
-1. Run this script. It queues a render for every {shot}_comp (and
-   {shot}_comp_OS) and writes {shot}_{suffix}.mov next to the plate.
+1. Run this script. It scans every {shot}_comp (and {shot}_comp_OS)
+   for a {shot}_plate precomp and shows a Confirm Shots dialog so
+   you can pick which ones to re-render. Confirmed plates get
+   {shot}_{suffix}.mov written next to them.
 2. The rendered file is imported back into the {shot}_plate precomp
    AND stacked above the original plate — below any renders/grades.
 3. Take the rendered file to the external tool, process it, and
@@ -43,18 +45,17 @@ not a copy of whatever the last external pass produced.
 
 WHAT GETS RENDERED
 ------------------
-The {shot}_plate precomp itself — NOT the outer {shot}_comp. That
-skips any comp-level effects/masks/layers the user may have added on
-top in {shot}_comp and gives you a pristine plate. Inside the precomp
-the script temporarily disables every layer except the original plate
-for the duration of the render, restoring enabled states afterwards
-via a try/finally.
+The outer {shot}_comp, over its workArea (the clip + handles range
+set by Shot Roundtrip). Every layer except the raw plate is disabled
+for the duration of the render (guide layers are already excluded by
+AE), so the output is the pristine plate — never a grade, render, or
+plate variant. Enabled states are restored via try/finally.
 
-If a comp is still in the flat layout from Shot Roundtrip (no
-{shot}_plate precomp yet), the precomp is created on the fly using
-the exact same logic as Import Renders & Grades — `moveAllAttributes=
-false` precompose of the hero plate, so every effect/transform/mask
-stays on the OUTER layer.
+Shot Roundtrip leaves the raw plate flat + locked at the bottom of
+`_comp`. The `{shot}_plate` precomp is created lazily — this script
+creates it at import time (first reimport lands inside it) so the
+round-tripped variant stacks in the same container as grades and VFX
+renders.
 
 VERSIONING
 ----------
@@ -232,12 +233,6 @@ and runs in detect-only mode.
         return /_comp_OS$/i.test(compName);
     }
 
-    function plateCompNameFor(compName) {
-        return compName.replace(/_comp(_OS)?$/i, function (_m, os) {
-            return "_plate" + (os || "");
-        });
-    }
-
     function buildImportedFilesMap() {
         var map = {};
         for (var i = 1; i <= proj.numItems; i++) {
@@ -305,11 +300,19 @@ and runs in detect-only mode.
         return null;
     }
 
-    // Ensure a {shot}_plate precomp exists inside `comp` and return it.
-    // Port of import_renders.jsx ensurePlatePrecomp — moveAllAttributes=false
-    // so every effect/transform/mask on the hero stays on the OUTER layer in
-    // _comp. Returns null if no hero plate is found.
-    function ensurePlatePrecomp(comp, shotName, readOnly, binShots) {
+    // Derive the plate-precomp name from a _comp name.
+    function plateCompNameFor(compName) {
+        return compName.replace(/_comp(_OS)?$/i, function (_m, os) {
+            return "_plate" + (os || "");
+        });
+    }
+
+    // Ensure a {shot}_plate precomp exists as a layer at the TOP of `comp`.
+    // Empty on first creation — holds only reimported variants (grades, VFX,
+    // denoised plates). Raw plate stays flat + locked at the bottom of `comp`.
+    // Mirror of import_renders.jsx's ensurePlatePrecomp so Re-render Plates can
+    // land its output in the same place. readOnly returns null if missing.
+    function ensurePlatePrecomp(comp, shotName, readOnly) {
         var targetName = plateCompNameFor(comp.name);
         for (var i = 1; i <= comp.numLayers; i++) {
             var L = comp.layer(i);
@@ -318,20 +321,19 @@ and runs in detect-only mode.
             } catch (e) {}
         }
         if (readOnly) return null;
-        var plateLayer = findPlateLayer(comp, shotName);
-        if (!plateLayer) return null;
-        var newPrecomp;
-        try {
-            newPrecomp = comp.layers.precompose([plateLayer.index], targetName, false);
-        } catch (ePC) { return null; }
+        var newComp = proj.items.addComp(
+            targetName, comp.width, comp.height, comp.pixelAspect,
+            comp.duration, comp.frameRate
+        );
+        newComp.displayStartTime = 0;
         try {
             var shotBin      = getChildBin(binShots, shotName);
             var shotPlateBin = shotBin ? getOrCreateChildBin(shotBin, "plate") : null;
-            if (shotPlateBin) newPrecomp.parentFolder = shotPlateBin;
+            if (shotPlateBin) newComp.parentFolder = shotPlateBin;
         } catch (eBin) {}
         try {
             if (comp.markerProperty && comp.markerProperty.numKeys > 0) {
-                var dstMkr = newPrecomp.markerProperty;
+                var dstMkr = newComp.markerProperty;
                 for (var mi = 1; mi <= comp.markerProperty.numKeys; mi++) {
                     try {
                         dstMkr.setValueAtTime(
@@ -342,7 +344,99 @@ and runs in detect-only mode.
                 }
             }
         } catch (eCM) {}
-        return newPrecomp;
+        var newLayer = comp.layers.add(newComp);
+        try { newLayer.moveToBeginning(); } catch (eMB) {}
+        try { newLayer.startTime = 0; } catch (eST) {}
+        return newComp;
+    }
+
+    // Confirm Shots preflight: lets the user toggle which shots to re-render.
+    // Defaults to all selected (opt-out, since the common case is "re-render
+    // everything"). Returns the filtered plan, or null if the user cancelled.
+    // Mirrors shot_roundtrip.jsx's Confirm Shots pattern — listbox + Toggle
+    // button + Space keystroke.
+    function showConfirmDialog(plan) {
+        var win = new Window("dialog", "Re-render Plates \u2014 Confirm");
+        win.orientation = "column"; win.alignChildren = ["fill", "top"];
+        win.spacing = 8; win.margins = 14;
+
+        win.add("statictext", undefined,
+            plan.length + " plate" + (plan.length === 1 ? "" : "s")
+            + " ready. Select rows and press Space (or Toggle Selected) to toggle "
+            + "whether they render. Checked rows render.");
+
+        // Column widths auto-sized from content.
+        var shotMax = 0, plateMax = 0, outMax = 0;
+        for (var ml = 0; ml < plan.length; ml++) {
+            var sn = plan[ml].shotName + (plan[ml].isOS ? " [OS]" : "");
+            if (sn.length > shotMax) shotMax = sn.length;
+            var pn = (plan[ml].plateLayer.source && plan[ml].plateLayer.source.name) ? plan[ml].plateLayer.source.name : "?";
+            if (pn.length > plateMax) plateMax = pn.length;
+            var on = plan[ml].outFile.name;
+            if (on.length > outMax) outMax = on.length;
+        }
+        var shotW  = Math.max(Math.min(shotMax  * 8 + 24, 200),  90);
+        var plateW = Math.max(Math.min(plateMax * 7 + 24, 340), 160);
+        var outW   = Math.max(Math.min(outMax   * 7 + 24, 400), 180);
+        var checkW = 60, framesW = 70;
+
+        var lb = win.add("listbox", undefined, [], {
+            multiselect: true,
+            numberOfColumns: 5,
+            showHeaders: true,
+            columnTitles: ["Render", "Shot", "Plate", "Frames", "Output"],
+            columnWidths: [checkW, shotW, plateW, framesW, outW]
+        });
+        var lbH = Math.min(Math.max(plan.length * 22 + 40, 180), 520);
+        lb.preferredSize = [checkW + shotW + plateW + framesW + outW + 40, lbH];
+
+        var selectedState = [];
+        for (var pi = 0; pi < plan.length; pi++) {
+            selectedState.push(true);
+            var item = lb.add("item", "\u2713");
+            item.subItems[0].text = plan[pi].shotName + (plan[pi].isOS ? " [OS]" : "");
+            item.subItems[1].text = (plan[pi].plateLayer.source && plan[pi].plateLayer.source.name) ? plan[pi].plateLayer.source.name : "?";
+            // Render span = _comp's workArea (clip + handles, set by Shot Roundtrip).
+            var fr = plan[pi].comp.frameRate;
+            var waDur = 0; try { waDur = plan[pi].comp.workAreaDuration; } catch (eWA) {}
+            var frames = (fr > 0 && waDur > 0) ? Math.round(waDur * fr) : 0;
+            item.subItems[2].text = String(frames);
+            item.subItems[3].text = plan[pi].outFile.name;
+        }
+
+        function toggleSelected() {
+            var sel = lb.selection;
+            if (!sel) return;
+            var arr = (sel.length !== undefined) ? sel : [sel];
+            for (var si = 0; si < arr.length; si++) {
+                var idx = arr[si].index;
+                selectedState[idx] = !selectedState[idx];
+                lb.items[idx].text = selectedState[idx] ? "\u2713" : "";
+            }
+        }
+
+        var btnGrp = win.add("group");
+        btnGrp.orientation = "row"; btnGrp.alignment = ["fill", "bottom"];
+        var spacer = btnGrp.add("statictext", undefined, ""); spacer.alignment = ["fill", "center"];
+        var btnToggle = btnGrp.add("button", undefined, "Toggle Selected"); btnToggle.preferredSize = [130, 28];
+        var btnCancel = btnGrp.add("button", undefined, "Cancel");          btnCancel.preferredSize = [80, 28];
+        var btnOk     = btnGrp.add("button", undefined, "Re-render");       btnOk.preferredSize     = [110, 28];
+
+        btnToggle.onClick = toggleSelected;
+        btnCancel.onClick = function () { win.close(2); };
+        btnOk.onClick     = function () { win.close(1); };
+
+        win.addEventListener("keydown", function (e) {
+            if (e.keyName === "Space") { e.preventDefault(); toggleSelected(); }
+        });
+
+        if (win.show() !== 1) return null;
+
+        var filtered = [];
+        for (var fi = 0; fi < plan.length; fi++) {
+            if (selectedState[fi]) filtered.push(plan[fi]);
+        }
+        return filtered;
     }
 
     // Save As → next _v## version (same pattern as import_renders.jsx).
@@ -392,101 +486,49 @@ and runs in detect-only mode.
 
     var binShots = getBinFolder("Shots");
 
-    // Version bump BEFORE any DOM mutation (same rule as import_renders.jsx).
-    var versionedFile = null;
-    if (!dryRun) {
-        versionedFile = saveAsNextVersion();
-        if (!versionedFile) return;
-    }
-
+    // Scan to build renderPlan. No project mutations here so the user can
+    // still cancel at the Confirm dialog below with nothing touched.
     var dryRunLog  = [];
     var errorLog   = [];
-    var renderPlan = [];  // { comp, platePrecomp, plateLayer, outFile, shotName, restoreStates }
+    var renderPlan = [];  // { comp, platePrecomp, plateLayer, outFile, shotName, isOS }
 
-    if (!dryRun) app.beginUndoGroup("Re-render Plates: prep");
     try {
         for (var ci = 0; ci < shotComps.length; ci++) {
             var comp     = shotComps[ci];
             var shotName = shotNameFromComp(comp.name);
             var isOS     = isOvercan(comp.name);
 
-            // Ensure / detect the _plate precomp. In dry-run `ensurePlatePrecomp`
-            // runs read-only and returns null for flat-layout comps — fall
-            // back to the outer `_comp` for plate detection so the dry-run
-            // preview still shows what WOULD happen.
-            var platePrecomp = ensurePlatePrecomp(comp, shotName, dryRun, binShots);
-            var wouldCreatePrecomp = false;
-            var plateSearchComp;
-            if (platePrecomp) {
-                plateSearchComp = platePrecomp;
-            } else if (dryRun) {
-                plateSearchComp  = comp;
-                wouldCreatePrecomp = true;
-            } else {
-                errorLog.push(shotName + (isOS ? " [OS]" : "") + ": no plate layer found; skipped.");
-                continue;
-            }
-
-            // Find the source plate (bottommost tagged).
-            var srcPlate = findPlateLayer(plateSearchComp, shotName);
+            // Raw plate is flat + locked in _comp (Shot Roundtrip layout). Find
+            // it directly in _comp — the {shot}_plate precomp, if it exists,
+            // holds only reimported variants and must not be our render source.
+            var srcPlate = findPlateLayer(comp, shotName);
             if (!srcPlate) {
                 errorLog.push(shotName + (isOS ? " [OS]" : "")
-                    + ": no plate layer found in " + plateSearchComp.name + "; skipped.");
+                    + ": no plate layer found in " + comp.name + "; skipped.");
                 continue;
             }
 
-            // Output path: {shots}/{shot}/plate/{shot}_{suffix}[_OS].mov
-            var shotDir = new Folder(fsShots.fsName + "/" + shotName);
-            if (!dryRun && !shotDir.exists) shotDir.create();
-            var plateDir = new Folder(shotDir.fsName + "/plate");
-            if (!dryRun && !plateDir.exists) plateDir.create();
-            var outName  = shotName + "_" + suffix + (isOS ? "_OS" : "") + ".mov";
-            var outFile  = new File(plateDir.fsName + "/" + outName);
+            var outName = shotName + "_" + suffix + (isOS ? "_OS" : "") + ".mov";
+            var outFile = new File(fsShots.fsName + "/" + shotName + "/plate/" + outName);
 
             if (dryRun) {
-                var prefix = wouldCreatePrecomp
-                    ? "would create " + plateCompNameFor(comp.name) + " + render \u2192 "
-                    : "would render " + platePrecomp.name + " \u2192 ";
                 dryRunLog.push(shotName + (isOS ? " [OS]" : "") + ": "
-                    + prefix + outFile.fsName
+                    + "would render " + comp.name + " \u2192 " + outFile.fsName
                     + " (plate layer: " + srcPlate.source.name + ")");
                 continue;
             }
 
-            // Snapshot enabled-states inside the precomp so we can restore
-            // after the render. Temporarily isolate the source plate so the
-            // render output is the raw plate, not whatever grade/render is
-            // currently topmost.
-            var restoreStates = [];
-            for (var li = 1; li <= platePrecomp.numLayers; li++) {
-                var L = platePrecomp.layer(li);
-                restoreStates.push({
-                    layer:   L,
-                    enabled: L.enabled,
-                    audio:   L.audioEnabled
-                });
-                if (L !== srcPlate) {
-                    try { L.enabled = false; } catch (eEn) {}
-                    try { L.audioEnabled = false; } catch (eAu) {}
-                }
-            }
-            // Make sure the plate itself is enabled.
-            try { srcPlate.enabled = true; } catch (ePE) {}
-
             renderPlan.push({
-                comp:          comp,
-                platePrecomp:  platePrecomp,
-                plateLayer:    srcPlate,
-                outFile:       outFile,
-                shotName:      shotName,
-                isOS:          isOS,
-                restoreStates: restoreStates
+                comp:       comp,
+                plateLayer: srcPlate,
+                outFile:    outFile,
+                shotName:   shotName,
+                isOS:       isOS
             });
         }
     } catch (ePrep) {
         errorLog.push("PREP: " + ePrep.message + " (line " + ePrep.line + ")");
     }
-    if (!dryRun) app.endUndoGroup();
 
     // ── Dry-run exit ──────────────────────────────────────────────────────────
     if (dryRun) {
@@ -511,14 +553,69 @@ and runs in detect-only mode.
         return;
     }
 
+    // ── Confirm Shots ────────────────────────────────────────────────────────
+    // User picks which plates to re-render. Cancel aborts cleanly — nothing
+    // has been mutated yet (no version bump, no layer disabling).
+    var confirmed = showConfirmDialog(renderPlan);
+    if (confirmed === null) return;
+    renderPlan = confirmed;
+    if (renderPlan.length === 0) {
+        showSummary("Re-render Plates", "No shots selected \u2014 nothing to render.");
+        return;
+    }
+
+    // ── Version bump (AFTER confirm, so cancelled runs don't leave a copy) ───
+    var versionedFile = saveAsNextVersion();
+    if (!versionedFile) return;
+
+    // ── Isolate plates + ensure output dirs ──────────────────────────────────
+    // Snapshot enabled-states inside each _comp so we can restore after the
+    // render. Temporarily disable every layer except the raw plate so the
+    // render output is the pristine plate — never a grade, render, or plate
+    // variant that happens to live in the {shot}_plate precomp above it.
+    // Guide layers (GUIDE_BURNIN, the DO-NOT-EDIT note) are auto-excluded.
+    app.beginUndoGroup("Re-render Plates: isolate");
+    try {
+        for (var pi = 0; pi < renderPlan.length; pi++) {
+            var rp = renderPlan[pi];
+
+            var shotDir = new Folder(fsShots.fsName + "/" + rp.shotName);
+            if (!shotDir.exists) shotDir.create();
+            var plateDir = new Folder(shotDir.fsName + "/plate");
+            if (!plateDir.exists) plateDir.create();
+
+            var restoreStates = [];
+            for (var li = 1; li <= rp.comp.numLayers; li++) {
+                var L = rp.comp.layer(li);
+                restoreStates.push({
+                    layer:   L,
+                    enabled: L.enabled,
+                    audio:   L.audioEnabled
+                });
+                if (L !== rp.plateLayer && !L.guideLayer) {
+                    try { L.enabled = false; } catch (eEn) {}
+                    try { L.audioEnabled = false; } catch (eAu) {}
+                }
+            }
+            // Raw plate is locked; enabled toggles still apply to locked layers.
+            try { rp.plateLayer.enabled = true; } catch (ePE) {}
+            rp.restoreStates = restoreStates;
+        }
+    } finally {
+        app.endUndoGroup();
+    }
+
     // ── Queue renders ─────────────────────────────────────────────────────────
     var queueErrors = [];
     for (var qi = 0; qi < renderPlan.length; qi++) {
         var entry = renderPlan[qi];
         try {
-            var rq = proj.renderQueue.items.add(entry.platePrecomp);
-            rq.timeSpanStart    = 0;
-            rq.timeSpanDuration = entry.platePrecomp.duration;
+            // Render the outer _comp over its workArea (= clip + handles set
+            // by Shot Roundtrip). Everything-but-plate is disabled above, so
+            // the output is the pristine raw plate.
+            var rq = proj.renderQueue.items.add(entry.comp);
+            rq.timeSpanStart    = entry.comp.workAreaStart;
+            rq.timeSpanDuration = entry.comp.workAreaDuration;
             var om = rq.outputModule(1);
             var foundT = false;
             for (var t = 0; t < om.templates.length; t++) if (om.templates[t] === omTemplate) foundT = true;
@@ -595,20 +692,32 @@ and runs in detect-only mode.
                 try { footageItem.replace(ent.outFile); reloaded++; } catch (eRl) {}
             }
 
-            // Add a layer inside the _plate precomp if not already present.
-            if (isFootageInComp(ent.platePrecomp, footageItem)) {
+            // Ensure the {shot}_plate precomp exists in _comp (create empty if
+            // this is the first reimport for the shot), then add the rendered
+            // variant inside it.
+            var platePrecomp = ensurePlatePrecomp(ent.comp, ent.shotName, false);
+            if (!platePrecomp) {
+                errorLog.push(ent.shotName + (ent.isOS ? " [OS]" : "")
+                    + ": could not create " + plateCompNameFor(ent.comp.name));
+                continue;
+            }
+            if (isFootageInComp(platePrecomp, footageItem)) {
                 skipped++;
                 continue;
             }
             try {
-                var newLayer = ent.platePrecomp.layers.add(footageItem);
-                newLayer.startTime = 0;
-                newLayer.position.setValue([ent.platePrecomp.width / 2, ent.platePrecomp.height / 2]);
+                var newLayer = platePrecomp.layers.add(footageItem);
+                // Render file duration = _comp.workAreaDuration (clip + handles).
+                // Drop it at workAreaStart so source-frame at handle-in lines up
+                // with comp time workAreaStart — matches import_renders.jsx's
+                // "clip+handles" alignment case.
+                try { newLayer.startTime = ent.comp.workAreaStart; } catch (eST) {}
+                newLayer.position.setValue([platePrecomp.width / 2, platePrecomp.height / 2]);
                 newLayer.label = 12;
                 // Plate variants sit above existing plate-like layers but
                 // below any renders/grades — matches import_renders.jsx's
                 // stack-above-topmost-plate-like convention.
-                var plateTop = findTopmostPlateLike(ent.platePrecomp);
+                var plateTop = findTopmostPlateLike(platePrecomp);
                 if (plateTop && plateTop !== newLayer) {
                     try { newLayer.moveBefore(plateTop); } catch (eMv) {}
                 }

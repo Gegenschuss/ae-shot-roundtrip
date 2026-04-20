@@ -394,30 +394,24 @@ optional flat _grade/ folder for Resolve returns:
         return newFile;
     }
 
-    // Derive the inner plate-precomp name from a shotComp name.
-    //   "KM_010_comp"    -> "KM_010_plate"
-    //   "KM_010_comp_OS" -> "KM_010_plate_OS"
+    // Derive the plate-precomp name from a _comp name.
+    //   "KM_010_comp"    → "KM_010_plate"
+    //   "KM_010_comp_OS" → "KM_010_plate_OS"
     function plateCompNameFor(compName) {
         return compName.replace(/_comp(_OS)?$/i, function (_m, os) {
             return "_plate" + (os || "");
         });
     }
 
-    // Ensure a {shot}_plate precomp exists inside `comp` and return it.
-    // On first run, pre-composes the hero/plate layer with
-    // moveAllAttributes=false ("Leave all attributes in the original
-    // composition") so every effect, transform, mask, and keyframe on the
-    // hero stays on the OUTER layer in _comp while only the raw plate
-    // source moves into the new precomp. Imports then stack INSIDE this
-    // precomp, so swapping visibility never duplicates any look work.
-    // Returns null if no hero layer is found (caller falls back to adding
-    // imports flat into the outer comp, matching the legacy behavior).
-    // readOnly=true skips creation — used for dry-run so previewing an
-    // import never mutates the project.
+    // Ensure a {shot}_plate precomp exists as a layer at the TOP of `comp`,
+    // and return its CompItem. The precomp is empty on first creation — it
+    // holds reimported variants only (grades, VFX renders, denoised plate
+    // variants). The raw plate stays flat + locked at the bottom of `comp`,
+    // never touched. Returns null in readOnly (dry-run) mode when the precomp
+    // doesn't exist yet, so the caller can log "would create".
     function ensurePlatePrecomp(comp, shotName, readOnly) {
         var targetName = plateCompNameFor(comp.name);
-        // Already wired? Look for a layer in `comp` whose source is a
-        // CompItem with the expected name.
+        // Already exists?
         for (var i = 1; i <= comp.numLayers; i++) {
             var L = comp.layer(i);
             try {
@@ -427,33 +421,28 @@ optional flat _grade/ folder for Resolve returns:
             } catch (e) {}
         }
         if (readOnly) return null;
-        // Not wired. Find the hero plate layer to precompose.
-        var plateLayer = findPlateLayer(comp, shotName);
-        if (!plateLayer) return null;
 
-        // moveAllAttributes=false is only valid for a single layer — which
-        // is exactly what we want. AE returns the new CompItem.
-        var newPrecomp;
-        try {
-            newPrecomp = comp.layers.precompose([plateLayer.index], targetName, false);
-        } catch (ePC) {
-            return null;
-        }
+        // Create empty CompItem matching `comp`'s dimensions + duration +
+        // frame rate so imported variants can be placed at their natural
+        // source-time position without further remapping.
+        var newComp = proj.items.addComp(
+            targetName, comp.width, comp.height, comp.pixelAspect,
+            comp.duration, comp.frameRate
+        );
+        newComp.displayStartTime = 0;
 
-        // File the new precomp under {Shots}/{shot}/plate/ so it sits next
-        // to the plate footage item it wraps.
+        // File under {Shots}/{shot}/plate/ so it sits next to the plate footage.
         try {
             var shotBin      = getChildBin(binShots, shotName);
             var shotPlateBin = shotBin ? getOrCreateChildBin(shotBin, "plate") : null;
-            if (shotPlateBin) newPrecomp.parentFolder = shotPlateBin;
+            if (shotPlateBin) newComp.parentFolder = shotPlateBin;
         } catch (eBin) {}
 
-        // Copy the outer comp's cut markers onto the new precomp so the
-        // existing alignment cascade (which reads comp.markerProperty)
-        // finds them inside the precomp too.
+        // Copy outer-comp cut markers so the alignment cascade below (which
+        // reads `importTarget.markerProperty`) finds them inside the precomp.
         try {
             if (comp.markerProperty && comp.markerProperty.numKeys > 0) {
-                var dstMkr = newPrecomp.markerProperty;
+                var dstMkr = newComp.markerProperty;
                 for (var mi = 1; mi <= comp.markerProperty.numKeys; mi++) {
                     try {
                         dstMkr.setValueAtTime(
@@ -465,7 +454,11 @@ optional flat _grade/ folder for Resolve returns:
             }
         } catch (eCM) {}
 
-        return newPrecomp;
+        // Add as top layer in _comp, starting at comp time 0.
+        var newLayer = comp.layers.add(newComp);
+        try { newLayer.moveToBeginning(); } catch (eMB) {}
+        try { newLayer.startTime = 0; } catch (eST) {}
+        return newComp;
     }
 
     // ── Main ──────────────────────────────────────────────────────────────────
@@ -551,17 +544,28 @@ optional flat _grade/ folder for Resolve returns:
         for (var ci = 0; ci < shotComps.length; ci++) {
             var comp     = shotComps[ci];
             var shotName = shotNameFromComp(comp.name);
-            // Ensure (or detect) the {shot}_plate precomp container. All
-            // layer operations below target this inner comp when it
-            // exists; effects on the OUTER layer in _comp are never
-            // touched. Dry-run runs in detect-only mode.
+            // Skip shots with no files queued to import — don't create empty
+            // {shot}_plate precomps just because Import Renders was run.
+            var hasAnyFiles = false;
+            for (var ck = 0; ck < CATEGORIES.length; ck++) {
+                if (filesForCategory(CATEGORIES[ck], shotName).length > 0) { hasAnyFiles = true; break; }
+            }
+            if (!hasAnyFiles) continue;
+
+            // {shot}_plate precomp holds all reimported variants (grades, VFX
+            // renders, denoised plate variants). Lazy-created the first time
+            // any variant is imported — the raw plate stays flat + locked at
+            // the bottom of _comp and is NEVER inside the precomp.
             var platePrecomp = ensurePlatePrecomp(comp, shotName, dryRun);
-            var importTarget = platePrecomp || comp;
-            if (dryRun && !platePrecomp && findPlateLayer(comp, shotName)) {
+            var importTarget = platePrecomp || comp;  // dry-run fallback for log/alignment
+            if (dryRun && !platePrecomp) {
                 dryRunLog.push(shotName + " [precomp]: would create "
                     + plateCompNameFor(comp.name));
             }
-            var plateLayer = findPlateLayer(importTarget, shotName);
+            // Raw plate always lives in `_comp` (locked by Shot Roundtrip).
+            // The precomp holds only reimported variants. Find the hero plate
+            // in `comp`, not `importTarget`.
+            var plateLayer = findPlateLayer(comp, shotName);
             var shotBin    = getChildBin(binShots, shotName);
             var addedAny   = false;
             var foundAnyCategoryFiles = false;
@@ -641,24 +645,19 @@ optional flat _grade/ folder for Resolve returns:
 
                     try {
                         var newLayer = importTarget.layers.add(footageItem);
-                        if (platePrecomp) {
-                            // Dumb stack inside the _plate precomp: drop at
-                            // t=0, no trimming, no marker fiddling. The
-                            // outer layer in _comp already carries the
-                            // preserved inPoint/outPoint/stretch from the
-                            // hero layer, so any per-layer alignment here
-                            // fights that and can shift full-handle
-                            // imports by a frame.
-                            newLayer.startTime = 0;
-                        } else {
-                            // Fallback — no hero layer to precompose, so
-                            // the import lands flat in the outer _comp.
-                            // Run the original cut-marker + duration-match
-                            // cascade so it still lands on the cut range.
+                        {
+                            // Alignment cascade — run unconditionally, whether the
+                            // import is going into the {shot}_plate precomp (new
+                            // default) or flat into _comp (fallback for dry-run or
+                            // legacy layout).
                             //   Duration-driven branch:
                             //     - new clip duration ≈ cut duration  →
                             //       cut-only render (Resolve default):
                             //       frame 0 → cut_in.
+                            //     - new clip duration ≈ workArea duration →
+                            //       clip+handles render (Shot Roundtrip /
+                            //       Nuke default): frame 0 → handle_in
+                            //       (workAreaStart).
                             //     - new clip duration ≈ plate duration →
                             //       full file with handles: mirror
                             //       plate.startTime and pin inPoint/
@@ -698,6 +697,13 @@ optional flat _grade/ folder for Resolve returns:
                             var newSrcDur = 0;
                             try { newSrcDur = footageItem.duration; } catch (eND) {}
 
+                            // workArea on _comp captures the clip+handles range (Shot
+                            // Roundtrip sets it at comp creation). Used to match
+                            // clip+handle-length reimports to their handle-in anchor.
+                            var waStart = 0, waDur = 0;
+                            try { waStart = comp.workAreaStart;    } catch (eWAS) {}
+                            try { waDur   = comp.workAreaDuration; } catch (eWAD) {}
+
                             if (cutInCT !== null) {
                                 var cutDur = (cutOutCT !== null) ? (cutOutCT - cutInCT) : 0;
                                 var plateSrcDur = 0;
@@ -706,6 +712,10 @@ optional flat _grade/ folder for Resolve returns:
                                 if (newSrcDur > 0 && cutDur > 0 &&
                                     Math.abs(newSrcDur - cutDur) <= alignTolerance) {
                                     newLayer.startTime = cutInCT;
+                                } else if (newSrcDur > 0 && waDur > 0 &&
+                                           Math.abs(newSrcDur - waDur) <= alignTolerance) {
+                                    // clip+handles render: frame 0 lands at handle-in.
+                                    newLayer.startTime = waStart;
                                 } else if (plateLayer && plateSrcDur > 0 &&
                                            Math.abs(newSrcDur - plateSrcDur) <= alignTolerance) {
                                     newLayer.startTime = plateLayer.startTime;
@@ -719,11 +729,9 @@ optional flat _grade/ folder for Resolve returns:
                             } else {
                                 newLayer.startTime = 0;
                             }
-                            // Copy cut markers onto the new layer so the
-                            // outer-comp flat fallback still shows the
-                            // roundtrip's cut boundaries. Skipped in the
-                            // precomp path — the plate inside the precomp
-                            // already carries them.
+                            // Copy cut markers onto the new layer so the cut
+                            // boundaries show on the imported layer's strip in
+                            // whichever comp it ends up (precomp or flat _comp).
                             var srcMkr = null;
                             if (plateLayer) {
                                 try {

@@ -148,11 +148,11 @@ work is underway. The pipeline is designed around this:
 >    and `Export Shot XML` derive the disk path from the comp name
 >    (`{prefix}_010_comp` → `{shots}/{prefix}_010/`). Comps without the
 >    `_comp` suffix are silently ignored.
-> 4. **Never move the plate layer's in-point.** In a fresh `_comp` it's
->    the hero footage layer at the bottom; after `Import Renders & Grades`
->    runs it lives inside the `_plate` precomp at the bottom of the
->    stack. Render imports and re-render passes locate it by tag and
->    align to its start time — shifting it misaligns every VFX return.
+> 4. **Never move the plate layer's in-point.** Shot Roundtrip locks the
+>    raw plate at the bottom of `_comp`. Reimported variants stack in a
+>    `{shot}_plate` precomp above it. Render imports and re-render passes
+>    locate the raw plate by tag and align to its start time — shifting
+>    it misaligns every VFX return.
 
 - **Shot Roundtrip** — Core tool. For every selected layer (direct footage
   OR precomp) it extracts a `{prefix}_NNN_comp` render target with
@@ -303,23 +303,19 @@ work is underway. The pipeline is designed around this:
   don't belong in that handoff, so they live in a separate flat archive
   at the shots root. Handed-off shot folders stay clean.
 
-  **Why the `_plate` precomp is created here, not by Shot Roundtrip:**
-  during the editorial-to-VFX phase the artist works directly on the
-  hero plate layer in `_comp` — adding effects, masks, transforms,
-  animation. Keeping the structure flat at this stage means there's no
-  precomp inviting them to apply work *inside* it (which would later
-  need to be transplanted onto the OUTER layer when imports start
-  stacking). When Import Renders & Grades runs the first time, the
-  hero layer is precomposed with `moveAllAttributes=false` — every
-  effect / transform / mask / keyframe stays on the OUTER layer in
-  `_comp`, and only the raw plate source moves into the new precomp.
-  From then on, the artist's work and the VFX/grade returns share the
-  same outer layer cleanly.
+  **Plate precomp layout:** Shot Roundtrip locks the raw plate at the
+  bottom of `_comp` and leaves it flat. It also creates an empty
+  `{shot}_plate` precomp as a layer at the TOP of `_comp` (above the
+  locked raw plate). All reimported variants live inside that precomp —
+  grades on top, VFX renders in the middle, plate variants at the
+  bottom — with only the topmost enabled per category. The raw plate
+  itself is never moved into the precomp. Import Renders & Grades will
+  re-create the precomp if missing (legacy projects) as a fallback.
 
   <img src="docs/import_renders.png" width="340" alt="Import Renders & Grades dialog">
 
-- **Re-render Plates** — Re-renders every shot's original plate to a new
-  filename, ready to be handed to an external tool (Neat Video, a
+- **Re-render Plates** — Re-renders selected shots' original plates to a
+  new filename, ready to be handed to an external tool (Neat Video, a
   stabilizer, Mocha, …) and brought back in. Outputs land next to the
   plate so they travel with the shot on handoff:
 
@@ -329,24 +325,30 @@ work is underway. The pipeline is designed around this:
   ```
 
   Dialog asks for a suffix (default `denoised`), the shots folder, and
-  the output-module template. It then, for every `*_comp`:
+  the output-module template. It then:
 
-  1. Ensures the `{shot}_plate` precomp exists (creates it on the fly
-     using the exact logic of Import Renders & Grades if the layout is
-     still flat — `moveAllAttributes=false`, so every effect/transform/
-     mask on the hero stays on the OUTER layer in `_comp`).
-  2. Temporarily isolates the bottom-most tagged plate layer inside the
-     precomp (disables everything else), so the render output is the
-     pristine plate — never a previously imported grade, render, or
-     plate variant. Enabled states are restored in a `try/finally`.
-  3. Queues the `_plate` precomp for render (not the outer `_comp`),
-     skipping any comp-level effects/masks the artist may have added.
-  4. After render, imports each rendered file back and stacks it above
-     the original plate inside the `_plate` precomp — below any VFX
-     renders or grades. Matches Import Renders & Grades' "renders stack
-     above the topmost plate-like layer" rule, so the new variant
-     becomes the active plate for future re-renders/imports without
-     disturbing the rest of the stack.
+  1. Scans every `*_comp` for its raw plate layer (the locked footage
+     layer at the bottom, tagged `_plate.` or sitting under a `/plate/`
+     folder). Shots with no plate layer are warn-and-skipped.
+  2. Shows a **Confirm Shots** preflight listing each candidate
+     (shot / plate source / frames / output filename). All rows are
+     checked by default — select rows and press Space (or `Toggle
+     Selected`) to opt any out. Cancel here aborts cleanly with zero
+     project mutations.
+  3. Temporarily disables every layer in `_comp` except the raw plate
+     (guide layers are auto-excluded from render already), so the output
+     is the pristine plate — never a previously imported grade, render,
+     or plate variant. Enabled states are restored in a `try/finally`.
+  4. Queues each `_comp` for render over its workArea (the clip +
+     handles span set by Shot Roundtrip), so `{shot}_{suffix}.mov` has
+     exactly the frames external tools need.
+  5. After render, imports each rendered file back. If the `{shot}_plate`
+     precomp doesn't exist yet (first reimport for that shot), it's
+     created empty at the top of `_comp`. The variant lands inside that
+     precomp, above any existing plate-like layers — matches Import
+     Renders & Grades' "renders stack above the topmost plate-like
+     layer" rule, so the new variant becomes the active plate for
+     future re-renders/imports without disturbing the rest of the stack.
 
   **External roundtrip:** take `{shot}_{suffix}.mov` into your external
   tool, process it, and **overwrite the file in place** (keep the same
@@ -355,10 +357,11 @@ work is underway. The pipeline is designed around this:
   every `_plate` precomp that references it, and the VFX + grade stack
   above keeps working as-is.
 
-  The script version-bumps the `.aep` first (same rule as Import
-  Renders & Grades) so the original file stays on disk as a rollback
-  point. Re-runs always re-render the ORIGINAL plate, never the
-  variant — so running it twice gives you a fresh raw plate, not a
+  The script version-bumps the `.aep` on Confirm (after the preflight,
+  before any DOM mutation) so cancelling the dialog leaves no copy
+  behind and the original file stays on disk as a rollback point once
+  a render starts. Re-runs always re-render the ORIGINAL plate, never
+  the variant — so running it twice gives you a fresh raw plate, not a
   copy of last pass's output.
 
 - **Export Shot XML** — Exports an FCPXML 1.8 timeline of all `*_comp`

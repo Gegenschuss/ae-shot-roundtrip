@@ -550,7 +550,7 @@ NOTES
 
             var lb = w.add("listbox", undefined, [], {
                 numberOfColumns: 3, showHeaders: true,
-                columnTitles: ["layer", "path", "effect"],
+                columnTitles: ["Layer", "Path", "Effect"],
                 columnWidths: [240, 520, 220]
             });
             for (var k = 0; k < reversed.length; k++) {
@@ -638,11 +638,11 @@ NOTES
             var headerRow = listPanel.add("group");
             headerRow.orientation = "row"; headerRow.spacing = 8;
             headerRow.alignChildren = ["left", "center"];
-            var hSrc = headerRow.add("statictext", undefined, "source");
+            var hSrc = headerRow.add("statictext", undefined, "Source");
             hSrc.preferredSize = [260, 18];
-            var hShots = headerRow.add("statictext", undefined, "shots that reference it");
+            var hShots = headerRow.add("statictext", undefined, "Shots That Reference It");
             hShots.preferredSize = [380, 18];
-            var hMode = headerRow.add("statictext", undefined, "mode");
+            var hMode = headerRow.add("statictext", undefined, "Mode");
             hMode.preferredSize = [120, 18];
 
             var modeOptions = ["Separate", "Shared", "Single"];
@@ -2026,7 +2026,7 @@ NOTES
         var confColFrames = Math.max(confFramesMaxLen * 8 + 16, 60);
         var confColRes    = Math.max(confResMaxLen    * 8 + 16, 90);
         var confColNotice = Math.max(confNoticeMaxLen * 7 + 16, 80);
-        var confColOs     = 32;
+        var confColOs     = 120; // width fits "Overscan Toggle" header
         var confColSource = Math.max(confPathMaxLen   * 8 + 24, 260);
         // Source column gets whatever space remains after the fixed columns.
         var confFixedW = confColShot + confColFrames + confColRes + confColNotice + confColOs + 60;
@@ -2055,7 +2055,7 @@ NOTES
             multiselect: true,
             numberOfColumns: 6,
             showHeaders: true,
-            columnTitles: ["shot", "frames", "res", "notice", "source", "os"],
+            columnTitles: ["Shot", "Frames", "Res", "Notice", "Source", "Overscan Toggle"],
             columnWidths: [confColShot, confColFrames, confColRes, confColNotice, confColSource, confColOs]
         });
         var confLBH = Math.max(confRows.length * 22 + 40, 200);
@@ -2749,12 +2749,15 @@ NOTES
                     if (containerInner) {
                         containerInner.replaceSource(shotComp, false);
                         // startTime=0 lines container time up with shotComp
-                        // (= source) time. inPoint/outPoint cover the full
-                        // source span so the layer shows no trim handles in
-                        // the container's timeline.
+                        // (= source) time. Trim inPoint/outPoint to the clip +
+                        // handles span so the layer in the container only
+                        // shows the used range — outside that range it's just
+                        // empty source that Nuke / Resolve / dynamicLink don't
+                        // need. Container duration stays at shotComp.duration
+                        // so source-time identity with mainComp still holds.
                         containerInner.startTime = 0;
-                        containerInner.inPoint   = 0;
-                        containerInner.outPoint  = shotCompDurSec;
+                        containerInner.inPoint   = fullStart;
+                        containerInner.outPoint  = fullStart + fullDurationSec;
                         // Markers in source/container time: cut_in at cutStart,
                         // cut_out at cutStart + cutDuration. containerComp,
                         // plateInner (inside shotComp), and containerInner all
@@ -2832,6 +2835,62 @@ NOTES
                     containerDurFrames = Math.round(source.duration * safeFPS);
                 }
 
+                // Lock the raw plate AFTER all marker / timing / effect writes
+                // (both branches above set markers on plateInner). Reimported
+                // variants stack inside the {shot}_plate precomp created below,
+                // not on this layer.
+                try { plateInner.locked = true; } catch (ePL) {}
+
+                // Create the {shot}_plate precomp as a layer at the TOP of
+                // _comp. Sized to clip + handles (matches the reimported
+                // plate.mov that lands inside it post-render), with
+                // displayStartTime carrying the source-TC offset. Reimported
+                // variants (grades, VFX, denoised plates) stack inside it.
+                var platePrecomp = null;
+                try {
+                    var plateCompName = shotName + "_plate" + osSuffix;
+                    platePrecomp = proj.items.addComp(
+                        plateCompName, osWidth, osHeight, source.pixelAspect,
+                        fullDurationSec, shotComp.frameRate
+                    );
+                    platePrecomp.displayStartTime = fullStart;
+                    platePrecomp.label = 14; // Cyan — plate precomp
+                    try { platePrecomp.parentFolder = getShotBin(shotBin, "plate"); } catch (ePB) {}
+
+                    // Copy cut markers so the alignment cascade in import_renders
+                    // (which reads precomp.markerProperty) finds cut in/out inside.
+                    // shotComp markers are in source time (displayStartTime=0);
+                    // precomp is local-0 at source-time=fullStart, so shift by
+                    // -fullStart to land in precomp's [0..fullDurationSec] range.
+                    if (shotComp.markerProperty && shotComp.markerProperty.numKeys > 0) {
+                        var dstMkr = platePrecomp.markerProperty;
+                        for (var mkIdx = 1; mkIdx <= shotComp.markerProperty.numKeys; mkIdx++) {
+                            try {
+                                var localT = shotComp.markerProperty.keyTime(mkIdx) - fullStart;
+                                if (localT >= 0 && localT <= fullDurationSec) {
+                                    dstMkr.setValueAtTime(localT, shotComp.markerProperty.keyValue(mkIdx));
+                                }
+                            } catch (eMk) {}
+                        }
+                    }
+
+                    // Outer layer spans fullStart..fullStart+fullDurationSec so
+                    // _comp-time = source-time identity still holds (render
+                    // queue timeSpanStart, dynamicLink, cut markers rely on it).
+                    var ppLayer = shotComp.layers.add(platePrecomp);
+                    try { ppLayer.startTime = fullStart; } catch (eST) {}
+                    try { ppLayer.inPoint   = fullStart; } catch (eIP) {}
+                    try { ppLayer.outPoint  = fullStart + fullDurationSec; } catch (eOP) {}
+                    try { ppLayer.moveToBeginning(); } catch (eMB) {}
+
+                    // GUIDE_BURNIN stays on top — both if/else branches above
+                    // already placed it at layer 1; re-assert after our insert.
+                    var blTop = shotComp.layers.byName("GUIDE_BURNIN");
+                    if (blTop) { blTop.locked = false; blTop.moveToBeginning(); blTop.locked = true; }
+                } catch (ePlatePC) {
+                    reportError("PLATE-PRECOMP", ePlatePC, "Plate precomp creation failed for " + shotName);
+                }
+
                 // ── Render queue ───────────────────────────────────────────────
                 var rq = proj.renderQueue.items.add(shotComp);
                 // Epsilon pushes timeSpanStart past any frame boundary, never reaching the buffer frame
@@ -2850,7 +2909,7 @@ NOTES
                 var pPath = new File(fsShotPlate.fsName + "/" + shotName + "_plate.mov");
                 om.file = pPath;
 
-                renderItems.push({ n: shotName, p: pPath, c: shotComp, s: fullStart, w: osWidth, h: osHeight, cs: cutStart, cd: cutDuration, bin: shotBin, rq: rq });
+                renderItems.push({ n: shotName, p: pPath, c: shotComp, s: fullStart, w: osWidth, h: osHeight, cs: cutStart, cd: cutDuration, bin: shotBin, rq: rq, pc: platePrecomp });
 
                 var cutDurationFrames = Math.round(cutDuration * safeFPS);
                 nukeDataList.push({
@@ -2977,29 +3036,39 @@ NOTES
                     imp.parentFolder = getShotBin(ri.bin, "plate");
                     imp.label = 9; // Green — VFX return mov
                     var tComp = ri.c;
-                    if(tComp instanceof CompItem) {
-                        var nL = tComp.layers.add(imp);
-                        // Plate starts exactly at fullStart (ri.s). An earlier
-                        // version subtracted one mainComp frame here "to
-                        // compensate for the render-queue epsilon pushing the
-                        // first rendered frame past a frame boundary" — but a
-                        // difference-matte test against the pre-roundtrip
-                        // output showed the compensation itself introduced a
-                        // +1 frame drift (roundtripped pixels arrived 1 frame
-                        // earlier than the source). timeSpanStart + 0.0001
-                        // lands INSIDE the frame at fullStart (intervals are
-                        // [N/fps, (N+1)/fps)), so AE renders that frame as
-                        // frame 0 of the plate — no offset needed.
-                        nL.startTime = ri.s;
+                    var tPrecomp = ri.pc;
+                    if (tComp instanceof CompItem && tPrecomp instanceof CompItem) {
+                        // Reimported {shot}_plate.mov lands INSIDE the
+                        // {shot}_plate precomp at time 0 — precomp duration
+                        // matches the .mov (= clip + handles), so the layer
+                        // fills the container exactly. The outer layer in
+                        // _comp is already at startTime=fullStart, so source
+                        // frame=fullStart still lines up with _comp time fullStart.
+                        var nL = tPrecomp.layers.add(imp);
+                        nL.startTime = 0;
                         nL.position.setValue([ri.w/2, ri.h/2]);
                         nL.label = 11;
-                        nL.property("Marker").setValueAtTime(ri.cs, cutMarker("cut in"));
-                        nL.property("Marker").setValueAtTime(ri.cs + ri.cd, cutMarker("cut out"));
-                        for(var xx=1; xx<=tComp.numLayers; xx++) {
-                            var L = tComp.layer(xx);
-                            if(L!==nL && !L.guideLayer) { L.enabled=false; L.audioEnabled=false; }
+                        // Cut markers in precomp time (precomp t=0 represents
+                        // source-time fullStart, so cut_in = ri.cs - ri.s).
+                        var cutInPP  = ri.cs - ri.s;
+                        var cutOutPP = cutInPP + ri.cd;
+                        try { nL.property("Marker").setValueAtTime(cutInPP,  cutMarker("cut in"));  } catch (eM1) {}
+                        try { nL.property("Marker").setValueAtTime(cutOutPP, cutMarker("cut out")); } catch (eM2) {}
+
+                        // In _comp: disable every layer except the plate
+                        // precomp itself and guide layers. Finds the precomp's
+                        // outer layer by source identity to avoid disabling it.
+                        var outerPPLayer = null;
+                        for (var oxx = 1; oxx <= tComp.numLayers; oxx++) {
+                            try { if (tComp.layer(oxx).source === tPrecomp) { outerPPLayer = tComp.layer(oxx); break; } } catch (eOP2) {}
                         }
-                        var bl=tComp.layers.byName("GUIDE_BURNIN"); if(bl) { bl.locked=false; bl.moveToBeginning(); bl.locked=true; }
+                        for (var xx = 1; xx <= tComp.numLayers; xx++) {
+                            var L = tComp.layer(xx);
+                            if (L === outerPPLayer) continue;
+                            if (L.guideLayer) continue;
+                            try { L.enabled = false; L.audioEnabled = false; } catch (eEnD) {}
+                        }
+                        var bl = tComp.layers.byName("GUIDE_BURNIN"); if (bl) { bl.locked=false; bl.moveToBeginning(); bl.locked=true; }
                         importedShots.push(ri.n);
                         count++;
                         cancelStats.rendersDone++;
