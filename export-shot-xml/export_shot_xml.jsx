@@ -30,6 +30,13 @@
  *
  * Import in DaVinci Resolve via:
  *   File → Import Timeline → Import AAF, EDL, XML…
+ *
+ * When launched standalone a Settings dialog offers:
+ *   "Extend Editorial Cut to Full Clip Length incl. Handles"
+ *     - Unchecked (default): trim each clip to its editorial cut-in /
+ *       cut-out markers (layer markers in LAYER time, unambiguous).
+ *     - Checked: extend to clip + handles via the immediate container's
+ *       workArea (the full rendered span Shot Roundtrip produced).
  */
 
 (function () {
@@ -370,6 +377,34 @@
     // Sanitise for use in a filename: strip characters that filesystems hate.
     var projectFileStem = projectBaseName.replace(/[\/\\:*?"<>|]/g, "_");
 
+    // ─── settings dialog ────────────────────────────────────────────────────
+    // Only show when running standalone — when invoked from Shot Roundtrip
+    // the default (editorial cut, no handles) applies automatically.
+    var extendToHandles = false;
+    if (!$.global.__shotRoundtripXMLDir) {
+        var dlg = new Window("dialog", "Export Shot XML");
+        dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
+        dlg.spacing = 10; dlg.margins = 14;
+
+        var pnl = dlg.add("panel", undefined, "Settings");
+        pnl.orientation = "column"; pnl.alignChildren = ["fill", "top"];
+        pnl.margins = [10, 15, 10, 10]; pnl.spacing = 6;
+
+        var chkExtend = pnl.add("checkbox", undefined,
+            "Extend Editorial Cut to Full Clip Length incl. Handles");
+        chkExtend.value = false;
+
+        var btnGrp = dlg.add("group");
+        btnGrp.orientation = "row"; btnGrp.alignment = ["fill", "bottom"];
+        var spacerD = btnGrp.add("statictext", undefined, ""); spacerD.alignment = ["fill", "center"];
+        var btnCancel = btnGrp.add("button", undefined, "Cancel"); btnCancel.preferredSize = [80, 28];
+        var btnExport = btnGrp.add("button", undefined, "Export"); btnExport.preferredSize = [110, 28];
+        btnCancel.onClick = function () { dlg.close(2); };
+        btnExport.onClick = function () { dlg.close(1); };
+        if (dlg.show() !== 1) return;
+        extendToHandles = chkExtend.value;
+    }
+
     var shotsFolder = findShotsFolder(proj.rootFolder);
     if (!shotsFolder) {
         alert("Could not find a folder named \"Shots\" in the project.");
@@ -432,12 +467,62 @@
         // locate the clip by its actual TC range, not physical frame 0).
         var fileTCFrame = fileInfo ? fileInfo.tcStartFrame : 0;
 
-        // Full clip: physical frame 0 to end, ignoring the AE layer trim.
-        // <file><timecode><frame> = fileTCFrame tells Resolve that physical frame 0
-        // corresponds to the embedded TC start, so in=0 correctly maps to TC start.
+        // Clip range — default is the editorial cut (no handles) from the
+        // picked layer's own cut in/out markers. Checkbox in the dialog
+        // switches to clip+handles via the immediate container's workArea:
+        //   FLAT layer: _comp.workArea = [fullStart, fullStart+fullDurationSec]
+        //   PRECOMP layer: stackComp default workArea = [0, duration]
+        //                   which is exactly the clip+handles render length.
+        // Layer markers are in LAYER time; with Shot Roundtrip's layers at
+        // startTime=0 + no stretch/remap, that equals source-file time.
+        var inSec = null, outSec = null;
+        var layerT0 = (layer.startTime || 0);
+
+        if (extendToHandles) {
+            var containerC = null;
+            try { containerC = layer.containingComp; } catch (eCC) {}
+            if (containerC) {
+                inSec  = (containerC.workAreaStart || 0) - layerT0;
+                outSec = inSec + (containerC.workAreaDuration || 0);
+            }
+        } else {
+            var layerMP = null;
+            try { layerMP = layer.property("Marker"); } catch (eLM) {}
+            if (layerMP && layerMP.numKeys > 0) {
+                for (var mkI = 1; mkI <= layerMP.numKeys; mkI++) {
+                    var mkV = layerMP.keyValue(mkI);
+                    var mkCmt = (mkV && mkV.comment) ? String(mkV.comment).toLowerCase() : "";
+                    if (mkCmt === "cut in")  inSec  = layerMP.keyTime(mkI);
+                    if (mkCmt === "cut out") outSec = layerMP.keyTime(mkI);
+                }
+            }
+            if (inSec === null || outSec === null) {
+                // No layer markers — fall back to the containing comp's workArea
+                // (clip+handles) so the export still produces something useful.
+                var contB = null;
+                try { contB = layer.containingComp; } catch (eCCB) {}
+                if (contB) {
+                    inSec  = (contB.workAreaStart || 0) - layerT0;
+                    outSec = inSec + (contB.workAreaDuration || 0);
+                    warnings.push(comp.name + ": cut markers not found on active layer — exported clip+handles as fallback.");
+                }
+            }
+        }
+
         var srcInF  = 0;
         var srcOutF = totalDurF;
         var durF    = totalDurF;
+        if (inSec !== null && outSec !== null && outSec > inSec) {
+            var inF  = Math.round(inSec  * srcFps);
+            var outF = Math.round(outSec * srcFps);
+            if (inF  < 0)           inF  = 0;
+            if (outF > totalDurF)   outF = totalDurF;
+            if (outF > inF) {
+                srcInF  = inF;
+                srcOutF = outF;
+                durF    = outF - inF;
+            }
+        }
 
         clips.push({
             n:           clips.length + 1,
