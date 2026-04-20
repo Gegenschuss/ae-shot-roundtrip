@@ -1313,6 +1313,12 @@ NOTES
             return results;
         }
 
+        // Tolerance for matching auto-keys vs our deliberately-placed keys
+        // during the prune step. About 1/2000 of a second — well below any
+        // realistic frame rate (240fps has 1/240 ≈ 4.2ms spacing) but loose
+        // enough to catch AE's own floating-point drift on key insertion.
+        var KEY_TIME_EPSILON_SEC = 0.0005;
+
         // Convert negative-stretch reversals to equivalent reversed time remaps.
         // A reversed time remap survives the roundtrip cleanly (mapTimeToSource
         // reads valueAtTime directly, so source-time resolution is data-driven
@@ -1325,6 +1331,9 @@ NOTES
         // the user had a different Hold in Place option, the visual extent may
         // shift slightly after `stretch = 100` — ExtendScript doesn't expose
         // the anchor mode, so this is the best we can do without prompting.
+        //
+        // SYNC: helpers/reverse_stretch_to_remap.jsx has an identical copy of
+        // this algorithm. Keep them in lockstep on bug fixes.
         function convertStretchReversalToRemap(layer) {
             try {
                 if (layer.timeRemapEnabled) return false;
@@ -1426,10 +1435,10 @@ NOTES
 
                 for (var k = tr.numKeys; k >= 1; k--) {
                     var kt = tr.keyTime(k);
-                    if (Math.abs(kt - preTime)    > 0.0005 &&
-                        Math.abs(kt - compStart)  > 0.0005 &&
-                        Math.abs(kt - endKeyTime) > 0.0005 &&
-                        Math.abs(kt - postTime)   > 0.0005) {
+                    if (Math.abs(kt - preTime)    > KEY_TIME_EPSILON_SEC &&
+                        Math.abs(kt - compStart)  > KEY_TIME_EPSILON_SEC &&
+                        Math.abs(kt - endKeyTime) > KEY_TIME_EPSILON_SEC &&
+                        Math.abs(kt - postTime)   > KEY_TIME_EPSILON_SEC) {
                         tr.removeKey(k);
                     }
                 }
@@ -2916,6 +2925,17 @@ NOTES
                     try { ppLayer.inPoint   = fullStart; } catch (eIP) {}
                     try { ppLayer.outPoint  = fullStart + fullDurationSec; } catch (eOP) {}
                     try { ppLayer.moveToBeginning(); } catch (eMB) {}
+
+                    // Cut in / cut out LAYER markers on the outer stack-comp
+                    // layer, so they show on its strip in _comp's timeline
+                    // (matching the markers already drawn on the raw plate
+                    // layer and GUIDE_BURNIN). Layer markers use LAYER time,
+                    // i.e., relative to layer.startTime: cut_in at comp-time
+                    // cutStart → layer-time (cutStart - fullStart) = handleSec.
+                    var cutInLT  = cutStart - fullStart;
+                    var cutOutLT = cutInLT  + cutDuration;
+                    try { ppLayer.property("Marker").setValueAtTime(cutInLT,  cutMarker("cut in"));  } catch (ePLMi) {}
+                    try { ppLayer.property("Marker").setValueAtTime(cutOutLT, cutMarker("cut out")); } catch (ePLMo) {}
 
                     // "Re-render" Checkbox Control effect — user ticks this in
                     // the Effect Controls panel during editing to flag the

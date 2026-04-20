@@ -52,6 +52,16 @@ other Hold modes may shift the layer's visual extent after stretch reset.
     var handleFrames = promptHandleFrames(50);
     if (handleFrames === null) return; // user cancelled
 
+    // Tolerance for matching auto-keys vs our deliberately-placed keys
+    // during the prune step. About 1/2000 of a second — well below any
+    // realistic frame rate but loose enough to catch AE's own floating-
+    // point drift on key insertion.
+    //
+    // SYNC: shot-roundtrip/shot_roundtrip.jsx has an identical copy of
+    // this algorithm (convertStretchReversalToRemap). Keep them in
+    // lockstep on bug fixes.
+    var KEY_TIME_EPSILON_SEC = 0.0005;
+
     function convertOne(layer) {
         if (!(layer instanceof AVLayer)) return "skipped (not an AV layer)";
         if (layer.timeRemapEnabled)      return "skipped (time remap already on)";
@@ -153,10 +163,10 @@ other Hold modes may shift the layer's visual extent after stretch reset.
 
         for (var k = tr.numKeys; k >= 1; k--) {
             var kt = tr.keyTime(k);
-            if (Math.abs(kt - preTime)    > 0.0005 &&
-                Math.abs(kt - compStart)  > 0.0005 &&
-                Math.abs(kt - endKeyTime) > 0.0005 &&
-                Math.abs(kt - postTime)   > 0.0005) {
+            if (Math.abs(kt - preTime)    > KEY_TIME_EPSILON_SEC &&
+                Math.abs(kt - compStart)  > KEY_TIME_EPSILON_SEC &&
+                Math.abs(kt - endKeyTime) > KEY_TIME_EPSILON_SEC &&
+                Math.abs(kt - postTime)   > KEY_TIME_EPSILON_SEC) {
                 tr.removeKey(k);
             }
         }

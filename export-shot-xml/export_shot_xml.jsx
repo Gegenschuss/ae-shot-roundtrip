@@ -32,11 +32,16 @@
  *   File → Import Timeline → Import AAF, EDL, XML…
  *
  * When launched standalone a Settings dialog offers:
- *   "Extend Editorial Cut to Full Clip Length incl. Handles"
- *     - Unchecked (default): trim each clip to its editorial cut-in /
- *       cut-out markers (layer markers in LAYER time, unambiguous).
- *     - Checked: extend to clip + handles via the immediate container's
- *       workArea (the full rendered span Shot Roundtrip produced).
+ *   "Trim to Editorial Cut (Experimental)"
+ *     - Unchecked (default): full clips — source AND sequence span both
+ *       cover `_comp.workArea` (clip + handles) at native speed. Stable,
+ *       matches the original XML export behaviour.
+ *     - Checked (experimental): trim each clip to its CURRENT mainComp
+ *       cut by walking `_comp.usedIn` up to the top of the project.
+ *       Retime / stretch / reverse along the chain is composed into the
+ *       source-time range and into the sequence span, so Resolve infers
+ *       speed from the clip:sequence duration ratio. Falls back to the
+ *       default full-clips behaviour if the chain walk fails.
  */
 
 (function () {
@@ -300,6 +305,66 @@
         return null;
     }
 
+    /**
+     * Walk UP via CompItem.usedIn to find the chain of layers from `comp` to
+     * its top-most parent (typically mainComp). Each chain entry is the
+     * layer in the parent that references the child.
+     *
+     *   chain[0]       = layer in comp's immediate parent (references comp)
+     *   chain[last]    = layer in the top-most comp (mainComp)
+     *
+     * Returns null if `comp` has no parents (top-level already).
+     */
+    function walkUpChain(comp) {
+        var chain = [];
+        var current = comp;
+        for (var safety = 0; safety < 20; safety++) {
+            var parents = null;
+            try { parents = current.usedIn; } catch (e) { break; }
+            if (!parents || parents.length === 0) break;
+            // Shared-source edge case: pick first parent. One XML clipitem
+            // per shot means we can't represent the shot being dropped into
+            // multiple mainComp positions; first-use is the safest default.
+            var parent = parents[0];
+            var foundLayer = null;
+            for (var li = 1; li <= parent.numLayers; li++) {
+                var L = parent.layer(li);
+                try { if (L.source === current) { foundLayer = L; break; } } catch (eF) {}
+            }
+            if (!foundLayer) break;
+            chain.push(foundLayer);
+            current = parent;
+        }
+        return chain.length > 0 ? { chain: chain, topComp: current } : null;
+    }
+
+    /**
+     * Map a time in the top-most comp down through the chain to the
+     * innermost comp's time. chain is produced by walkUpChain().
+     *
+     * For each layer: honors time-remap when enabled; otherwise uses the
+     * linear formula (compTime - startTime) * (100 / stretch). Handles
+     * non-100% stretch and reverse (negative stretch, producing
+     * decreasing time → caller must detect).
+     */
+    function mapTimeDownChain(topTime, chain) {
+        var t = topTime;
+        for (var i = chain.length - 1; i >= 0; i--) {
+            var L = chain[i];
+            var start = 0, stretch = 100;
+            try { start   = L.startTime || 0;  } catch (eS)  {}
+            try { stretch = L.stretch   || 100; } catch (eSt) {}
+            try {
+                if (L.timeRemapEnabled) {
+                    var remap = L.property("ADBE Time Remapping");
+                    if (remap) { t = remap.valueAtTime(t, false); continue; }
+                }
+            } catch (eR) {}
+            t = (t - start) * (100 / stretch);
+        }
+        return t;
+    }
+
     function shotNameFromComp(compName) {
         // Must mirror the leniency of collectCompItems() so "KM_010_comp"
         // and "KM_010_comp_OS" both resolve to "KM_010" — otherwise the
@@ -378,9 +443,10 @@
     var projectFileStem = projectBaseName.replace(/[\/\\:*?"<>|]/g, "_");
 
     // ─── settings dialog ────────────────────────────────────────────────────
-    // Only show when running standalone — when invoked from Shot Roundtrip
-    // the default (editorial cut, no handles) applies automatically.
-    var extendToHandles = false;
+    // Default = full clips (clip + handles) with native-speed sequence spans —
+    // the stable path that's been shipping. Opt-in to the experimental
+    // mainComp-chain trim via the checkbox.
+    var trimToCut = false;
     if (!$.global.__shotRoundtripXMLDir) {
         var dlg = new Window("dialog", "Export Shot XML");
         dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
@@ -390,9 +456,9 @@
         pnl.orientation = "column"; pnl.alignChildren = ["fill", "top"];
         pnl.margins = [10, 15, 10, 10]; pnl.spacing = 6;
 
-        var chkExtend = pnl.add("checkbox", undefined,
-            "Extend Editorial Cut to Full Clip Length incl. Handles");
-        chkExtend.value = false;
+        var chkTrim = pnl.add("checkbox", undefined,
+            "Trim to Editorial Cut (Experimental)");
+        chkTrim.value = false;
 
         var btnGrp = dlg.add("group");
         btnGrp.orientation = "row"; btnGrp.alignment = ["fill", "bottom"];
@@ -402,7 +468,7 @@
         btnCancel.onClick = function () { dlg.close(2); };
         btnExport.onClick = function () { dlg.close(1); };
         if (dlg.show() !== 1) return;
-        extendToHandles = chkExtend.value;
+        trimToCut = chkTrim.value;
     }
 
     var shotsFolder = findShotsFolder(proj.rootFolder);
@@ -467,46 +533,81 @@
         // locate the clip by its actual TC range, not physical frame 0).
         var fileTCFrame = fileInfo ? fileInfo.tcStartFrame : 0;
 
-        // Clip range — default is the editorial cut (no handles) from the
-        // picked layer's own cut in/out markers. Checkbox in the dialog
-        // switches to clip+handles via the immediate container's workArea:
-        //   FLAT layer: _comp.workArea = [fullStart, fullStart+fullDurationSec]
-        //   PRECOMP layer: stackComp default workArea = [0, duration]
-        //                   which is exactly the clip+handles render length.
-        // Layer markers are in LAYER time; with Shot Roundtrip's layers at
-        // startTime=0 + no stretch/remap, that equals source-file time.
-        var inSec = null, outSec = null;
-        var layerT0 = (layer.startTime || 0);
+        // _comp time → source-file frame mapping:
+        //   - FLAT:    active layer is raw plate in _comp @ startTime=0 →
+        //              offset = 0; src-frame = compTime * srcFps.
+        //   - PRECOMP: active layer is inside stack, outer stack layer in
+        //              _comp is at startTime=fullStart=_comp.workAreaStart →
+        //              offset = workAreaStart; src-frame = (compTime - offset) * srcFps.
+        var containingC = null;
+        try { containingC = layer.containingComp; } catch (eCC) {}
+        var isNested = !!(containingC && containingC !== comp);
+        var offsetSec = 0;
+        if (isNested) {
+            try { offsetSec = comp.workAreaStart || 0; } catch (eWA) {}
+        }
 
-        if (extendToHandles) {
-            var containerC = null;
-            try { containerC = layer.containingComp; } catch (eCC) {}
-            if (containerC) {
-                inSec  = (containerC.workAreaStart || 0) - layerT0;
-                outSec = inSec + (containerC.workAreaDuration || 0);
+        // Primary: walk UP via usedIn to find the outermost mainComp layer.
+        // Its inPoint/outPoint give the CURRENT mainComp cut (picks up later
+        // edits in AE automatically). Map those times through the chain down
+        // to _comp time, then through the offset to source-file time.
+        //
+        // Falls back to _comp cut markers + workArea if the walk fails
+        // (shot never wired into an edit, shared-source corner cases, etc.).
+        var chainResult = walkUpChain(comp);
+        var mainSpanSec     = null;  // mainComp-time duration of the shot
+        var chainInSec      = null;  // _comp time mapped from mainComp in
+        var chainOutSec     = null;  // _comp time mapped from mainComp out
+        if (chainResult && chainResult.chain.length > 0) {
+            var topLayer = chainResult.chain[chainResult.chain.length - 1];
+            var mIn = 0, mOut = 0;
+            try { mIn  = topLayer.inPoint;  } catch (eMi) {}
+            try { mOut = topLayer.outPoint; } catch (eMo) {}
+            if (mOut > mIn) {
+                mainSpanSec = mOut - mIn;
+                try { chainInSec  = mapTimeDownChain(mIn,  chainResult.chain); } catch (eMI2) {}
+                try { chainOutSec = mapTimeDownChain(mOut, chainResult.chain); } catch (eMO2) {}
             }
+        }
+
+        var cutInCT = null, cutOutCT = null;
+        if (comp.markerProperty && comp.markerProperty.numKeys > 0) {
+            for (var mkI = 1; mkI <= comp.markerProperty.numKeys; mkI++) {
+                var mkV = comp.markerProperty.keyValue(mkI);
+                var mkCmt = (mkV && mkV.comment) ? String(mkV.comment).toLowerCase() : "";
+                if (mkCmt === "cut in")  cutInCT  = comp.markerProperty.keyTime(mkI);
+                if (mkCmt === "cut out") cutOutCT = comp.markerProperty.keyTime(mkI);
+            }
+        }
+
+        var inSec = null, outSec = null;
+        if (!trimToCut) {
+            // Default "full clips" path: source range = _comp.workArea
+            // (clip + handles). Unchanged from the original XML export.
+            var waS = 0, waD = 0;
+            try { waS = comp.workAreaStart || 0; } catch (eWaA) {}
+            try { waD = comp.workAreaDuration || 0; } catch (eWaB) {}
+            if (waD > 0) {
+                inSec  = waS - offsetSec;
+                outSec = (waS + waD) - offsetSec;
+            }
+        } else if (chainInSec !== null && chainOutSec !== null) {
+            // Chain-walk succeeded → use mainComp cut (current edit state).
+            // Normalise: negative stretch can make mapped out < in.
+            if (chainOutSec > chainInSec) {
+                inSec  = chainInSec  - offsetSec;
+                outSec = chainOutSec - offsetSec;
+            } else if (chainInSec > chainOutSec) {
+                inSec  = chainOutSec - offsetSec;
+                outSec = chainInSec  - offsetSec;
+                warnings.push(comp.name + ": reversed chain detected — using absolute range; speed direction not encoded.");
+            }
+        } else if (cutInCT !== null && cutOutCT !== null && cutOutCT > cutInCT) {
+            // Fallback: _comp cut markers (baked at Shot Roundtrip time).
+            inSec  = cutInCT  - offsetSec;
+            outSec = cutOutCT - offsetSec;
         } else {
-            var layerMP = null;
-            try { layerMP = layer.property("Marker"); } catch (eLM) {}
-            if (layerMP && layerMP.numKeys > 0) {
-                for (var mkI = 1; mkI <= layerMP.numKeys; mkI++) {
-                    var mkV = layerMP.keyValue(mkI);
-                    var mkCmt = (mkV && mkV.comment) ? String(mkV.comment).toLowerCase() : "";
-                    if (mkCmt === "cut in")  inSec  = layerMP.keyTime(mkI);
-                    if (mkCmt === "cut out") outSec = layerMP.keyTime(mkI);
-                }
-            }
-            if (inSec === null || outSec === null) {
-                // No layer markers — fall back to the containing comp's workArea
-                // (clip+handles) so the export still produces something useful.
-                var contB = null;
-                try { contB = layer.containingComp; } catch (eCCB) {}
-                if (contB) {
-                    inSec  = (contB.workAreaStart || 0) - layerT0;
-                    outSec = inSec + (contB.workAreaDuration || 0);
-                    warnings.push(comp.name + ": cut markers not found on active layer — exported clip+handles as fallback.");
-                }
-            }
+            warnings.push(comp.name + ": no mainComp chain and no cut markers — exported full source as fallback.");
         }
 
         var srcInF  = 0;
@@ -515,8 +616,8 @@
         if (inSec !== null && outSec !== null && outSec > inSec) {
             var inF  = Math.round(inSec  * srcFps);
             var outF = Math.round(outSec * srcFps);
-            if (inF  < 0)           inF  = 0;
-            if (outF > totalDurF)   outF = totalDurF;
+            if (inF  < 0)         inF  = 0;
+            if (outF > totalDurF) outF = totalDurF;
             if (outF > inF) {
                 srcInF  = inF;
                 srcOutF = outF;
@@ -525,19 +626,20 @@
         }
 
         clips.push({
-            n:           clips.length + 1,
-            name:        layer.source.file.displayName,
-            comp:        comp.name,
-            path:        layer.source.file.fsName,
-            compFps:     compFps,     // used only for seq start/end conversion
-            srcFps:      srcFps,      // native fps of the source file
-            width:       comp.width,
-            height:      comp.height,
-            srcInF:      srcInF,      // TC-based in frame
-            srcOutF:     srcOutF,     // TC-based out frame
-            durF:        durF,
-            totalDurF:   totalDurF,   // from file header
-            fileTCFrame: fileTCFrame  // embedded TC start frame
+            n:             clips.length + 1,
+            name:          layer.source.file.displayName,
+            comp:          comp.name,
+            path:          layer.source.file.fsName,
+            compFps:       compFps,     // used only for seq start/end conversion
+            srcFps:        srcFps,      // native fps of the source file
+            width:         comp.width,
+            height:        comp.height,
+            srcInF:        srcInF,      // TC-based in frame
+            srcOutF:       srcOutF,     // TC-based out frame
+            durF:          durF,
+            totalDurF:     totalDurF,   // from file header
+            fileTCFrame:   fileTCFrame, // embedded TC start frame
+            mainSpanSec:   mainSpanSec  // null if chain-walk failed; else mainComp visible duration
         });
     }
 
@@ -551,9 +653,26 @@
     var seqHead = 0;
     for (var i = 0; i < clips.length; i++) {
         var cl = clips[i];
-        // <start>/<end>: position in the SEQUENCE timeline (seqFps frames).
-        // Convert using compFps (how AE timed the clip in the comp).
-        cl.durSeqF   = Math.round(cl.durF * seqFps / cl.srcFps);
+        // Sequence span (<end> - <start>) in seqFps frames.
+        //
+        // Default "full clips" mode: source AND sequence span both cover the
+        // clip+handles range at native speed — the stable path, unchanged.
+        //
+        // Experimental "trim to cut" mode: mainSpanSec from the usedIn chain
+        // walk is the shot's actual duration in mainComp. For straight shots
+        // it equals source cut duration; for retimed / stretched / reversed
+        // shots it differs, and that ratio is what Resolve interprets as
+        // speed.
+        //
+        // Fallback when the chain walk failed: use durF/srcFps so the export
+        // matches the pre-chain behaviour.
+        var seqDurSec;
+        if (!trimToCut || cl.mainSpanSec === null) {
+            seqDurSec = cl.durF / cl.srcFps;
+        } else {
+            seqDurSec = cl.mainSpanSec;
+        }
+        cl.durSeqF   = Math.round(seqDurSec * seqFps);
         cl.seqStartF = seqHead;
         cl.seqEndF   = seqHead + cl.durSeqF;
         seqHead += cl.durSeqF;
