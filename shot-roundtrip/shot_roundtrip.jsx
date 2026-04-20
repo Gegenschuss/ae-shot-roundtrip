@@ -2162,7 +2162,7 @@ NOTES
         if (!versionedFile) { progress.close(); return; }
         cancelStats.mutationsStarted = true;
         progress.update(
-            "Working in new version: " + versionedFile.name,
+            "Working in new version: " + versionedFile.displayName,
             "Original is preserved on disk as the backup.",
             15
         );
@@ -2612,6 +2612,17 @@ NOTES
                                            ? wReg.firstShotName + suffix
                                            : wReg.firstShotName + "_" + pad(wReg.lastNum, 3) + suffix;
                                 try { wComp.name = icName + osSuffix; } catch(eIR) {}
+                                // File into the shot's bin so it doesn't float
+                                // at the project root. Single-shot wrappers go
+                                // under /Shots/{shot}/; multi-shot range wrappers
+                                // under /Shots/{shot}_{lastNum}/.
+                                try {
+                                    var icBinName = (wReg.firstNum === wReg.lastNum)
+                                                  ? wReg.firstShotName
+                                                  : wReg.firstShotName + "_" + pad(wReg.lastNum, 3);
+                                    var icBin = getShotBin(binShots, icBinName);
+                                    if (icBin) wComp.parentFolder = icBin;
+                                } catch(eICBin) {}
                             }
                         }
                     } catch(eIRB) {}
@@ -2857,22 +2868,14 @@ NOTES
                     platePrecomp.label = 14; // Cyan — plate precomp
                     try { platePrecomp.parentFolder = getShotBin(shotBin, "plate"); } catch (ePB) {}
 
-                    // Copy cut markers so the alignment cascade in import_renders
-                    // (which reads precomp.markerProperty) finds cut in/out inside.
-                    // shotComp markers are in source time (displayStartTime=0);
-                    // precomp is local-0 at source-time=fullStart, so shift by
-                    // -fullStart to land in precomp's [0..fullDurationSec] range.
-                    if (shotComp.markerProperty && shotComp.markerProperty.numKeys > 0) {
-                        var dstMkr = platePrecomp.markerProperty;
-                        for (var mkIdx = 1; mkIdx <= shotComp.markerProperty.numKeys; mkIdx++) {
-                            try {
-                                var localT = shotComp.markerProperty.keyTime(mkIdx) - fullStart;
-                                if (localT >= 0 && localT <= fullDurationSec) {
-                                    dstMkr.setValueAtTime(localT, shotComp.markerProperty.keyValue(mkIdx));
-                                }
-                            } catch (eMk) {}
-                        }
-                    }
+                    // Cut in / cut out markers. setValueAtTime on comp.markerProperty
+                    // uses the comp's DISPLAYED time (i.e., the time ruler's
+                    // values), not local-0-based time. Since the precomp's
+                    // displayStartTime=fullStart, displayed time == source time,
+                    // so pass cutStart / cutStart+cutDuration directly — same
+                    // values used for shotComp's markers above.
+                    try { platePrecomp.markerProperty.setValueAtTime(cutStart,               cutMarker("cut in"));  } catch (eMkIn)  {}
+                    try { platePrecomp.markerProperty.setValueAtTime(cutStart + cutDuration, cutMarker("cut out")); } catch (eMkOut) {}
 
                     // Outer layer spans fullStart..fullStart+fullDurationSec so
                     // _comp-time = source-time identity still holds (render
@@ -2882,6 +2885,15 @@ NOTES
                     try { ppLayer.inPoint   = fullStart; } catch (eIP) {}
                     try { ppLayer.outPoint  = fullStart + fullDurationSec; } catch (eOP) {}
                     try { ppLayer.moveToBeginning(); } catch (eMB) {}
+
+                    // "Rerender" Checkbox Control effect — user ticks this in
+                    // the Effect Controls panel during editing to flag the
+                    // shot for re-rendering on the next Re-render Plates run.
+                    // Re-render Plates reads + auto-resets this after success.
+                    try {
+                        var rrEff = ppLayer.Effects.addProperty("ADBE Checkbox Control");
+                        rrEff.name = "Rerender";
+                    } catch (eRR) {}
 
                     // GUIDE_BURNIN stays on top — both if/else branches above
                     // already placed it at layer 1; re-assert after our insert.
@@ -3039,11 +3051,11 @@ NOTES
                     var tPrecomp = ri.pc;
                     if (tComp instanceof CompItem && tPrecomp instanceof CompItem) {
                         // Reimported {shot}_plate.mov lands INSIDE the
-                        // {shot}_plate precomp at time 0 — precomp duration
-                        // matches the .mov (= clip + handles), so the layer
-                        // fills the container exactly. The outer layer in
-                        // _comp is already at startTime=fullStart, so source
-                        // frame=fullStart still lines up with _comp time fullStart.
+                        // {shot}_plate precomp at startTime=0 (local-0 of
+                        // the precomp = source-TC fullStart via
+                        // displayStartTime). layer.startTime is in LOCAL
+                        // time; the render queue's timeSpanStart is the
+                        // one that reads displayed time.
                         var nL = tPrecomp.layers.add(imp);
                         nL.startTime = 0;
                         nL.position.setValue([ri.w/2, ri.h/2]);

@@ -94,9 +94,6 @@ and runs in detect-only mode.
     var r1 = addRow(pnl, "Suffix:");
     var etSuffix = r1.add("edittext", undefined, "denoised");
     etSuffix.preferredSize = [150, FIELD_H];
-    var suffixHint = r1.add("statictext", undefined, "\u2192 {shot}_{suffix}.mov");
-    suffixHint.graphics.foregroundColor = suffixHint.graphics.newPen(
-        suffixHint.graphics.PenType.SOLID_COLOR, [0.55, 0.55, 0.55, 1], 1);
 
     var r2 = addRow(pnl, "Shots Folder:");
     var etShotsFolder = r2.add("edittext", undefined, "../Roundtrip");
@@ -120,7 +117,7 @@ and runs in detect-only mode.
     var etOM = r3.add("edittext", undefined, "ProRes 422 HQ");
     etOM.preferredSize = [150, FIELD_H];
 
-    var chkDryRun = pnl.add("checkbox", undefined, "Dry run (preview only, no changes)");
+    var chkDryRun = pnl.add("checkbox", undefined, "Dry run");
     chkDryRun.value = false;
 
     // ── Settings persistence ──────────────────────────────
@@ -351,19 +348,34 @@ and runs in detect-only mode.
     }
 
     // Confirm Shots preflight: lets the user toggle which shots to re-render.
-    // Defaults to all selected (opt-out, since the common case is "re-render
-    // everything"). Returns the filtered plan, or null if the user cancelled.
-    // Mirrors shot_roundtrip.jsx's Confirm Shots pattern — listbox + Toggle
-    // button + Space keystroke.
+    // Pre-check logic — if any plate precomps are flagged (red label in AE's
+    // Project panel), default-check only those; otherwise default-check all
+    // (classic opt-out). User can still toggle any row with Space or the
+    // Toggle button. Mirrors shot_roundtrip.jsx's Confirm Shots pattern.
     function showConfirmDialog(plan) {
+        var anyFlagged = false, flagCount = 0;
+        for (var fl = 0; fl < plan.length; fl++) {
+            if (plan[fl].flagged) { anyFlagged = true; flagCount++; }
+        }
+
         var win = new Window("dialog", "Re-render Plates \u2014 Confirm");
         win.orientation = "column"; win.alignChildren = ["fill", "top"];
         win.spacing = 8; win.margins = 14;
 
         win.add("statictext", undefined,
             plan.length + " plate" + (plan.length === 1 ? "" : "s")
-            + " ready. Select rows and press Space (or Toggle Selected) to toggle "
-            + "whether they render. Checked rows render.");
+            + " ready. Select rows and click Enabled / Disabled (or press Space to toggle "
+            + "individual rows). Checked rows render.");
+        if (anyFlagged) {
+            win.add("statictext", undefined,
+                flagCount + " shot" + (flagCount === 1 ? "" : "s")
+                + " flagged via the Rerender checkbox on the plate precomp layer \u2014 only those are pre-checked."
+                + " Flags auto-reset after a successful re-render.");
+        } else {
+            win.add("statictext", undefined,
+                "Tip: tick the \u201cRerender\u201d Checkbox Control on a {shot}_plate precomp layer "
+                + "(Effect Controls panel) during editing to flag it for re-render on the next run.");
+        }
 
         // Column widths auto-sized from content.
         var shotMax = 0, plateMax = 0, outMax = 0;
@@ -378,56 +390,78 @@ and runs in detect-only mode.
         var shotW  = Math.max(Math.min(shotMax  * 8 + 24, 200),  90);
         var plateW = Math.max(Math.min(plateMax * 7 + 24, 340), 160);
         var outW   = Math.max(Math.min(outMax   * 7 + 24, 400), 180);
-        var checkW = 60, framesW = 70;
+        var checkW = 60, flagW = 50, framesW = 70;
 
         var lb = win.add("listbox", undefined, [], {
             multiselect: true,
-            numberOfColumns: 5,
+            numberOfColumns: 6,
             showHeaders: true,
-            columnTitles: ["Render", "Shot", "Plate", "Frames", "Output"],
-            columnWidths: [checkW, shotW, plateW, framesW, outW]
+            columnTitles: ["Render", "Flag", "Shot", "Plate", "Frames", "Output"],
+            columnWidths: [checkW, flagW, shotW, plateW, framesW, outW]
         });
         var lbH = Math.min(Math.max(plan.length * 22 + 40, 180), 520);
-        lb.preferredSize = [checkW + shotW + plateW + framesW + outW + 40, lbH];
+        lb.preferredSize = [checkW + flagW + shotW + plateW + framesW + outW + 40, lbH];
 
         var selectedState = [];
         for (var pi = 0; pi < plan.length; pi++) {
-            selectedState.push(true);
-            var item = lb.add("item", "\u2713");
-            item.subItems[0].text = plan[pi].shotName + (plan[pi].isOS ? " [OS]" : "");
-            item.subItems[1].text = (plan[pi].plateLayer.source && plan[pi].plateLayer.source.name) ? plan[pi].plateLayer.source.name : "?";
-            // Render span = _comp's workArea (clip + handles, set by Shot Roundtrip).
-            var fr = plan[pi].comp.frameRate;
-            var waDur = 0; try { waDur = plan[pi].comp.workAreaDuration; } catch (eWA) {}
-            var frames = (fr > 0 && waDur > 0) ? Math.round(waDur * fr) : 0;
-            item.subItems[2].text = String(frames);
-            item.subItems[3].text = plan[pi].outFile.name;
+            // If any shot is flagged, pre-check only flagged ones. Otherwise
+            // pre-check all (classic opt-out). User can toggle either way.
+            var preChecked = anyFlagged ? !!plan[pi].flagged : true;
+            selectedState.push(preChecked);
+            var item = lb.add("item", preChecked ? "\u2713" : "");
+            item.subItems[0].text = plan[pi].flagged ? "\u25cf" : "";
+            item.subItems[1].text = plan[pi].shotName + (plan[pi].isOS ? " [OS]" : "");
+            item.subItems[2].text = (plan[pi].plateLayer.source && plan[pi].plateLayer.source.name) ? plan[pi].plateLayer.source.name : "?";
+            // Render span = plate precomp's full duration (clip + handles).
+            var fr = plan[pi].platePrecomp.frameRate;
+            var pDur = 0; try { pDur = plan[pi].platePrecomp.duration; } catch (eWA) {}
+            var frames = (fr > 0 && pDur > 0) ? Math.round(pDur * fr) : 0;
+            item.subItems[3].text = String(frames);
+            item.subItems[4].text = plan[pi].outFile.name;
         }
 
-        function toggleSelected() {
+        function setSelected(value) {
             var sel = lb.selection;
             if (!sel) return;
             var arr = (sel.length !== undefined) ? sel : [sel];
-            for (var si = 0; si < arr.length; si++) {
-                var idx = arr[si].index;
-                selectedState[idx] = !selectedState[idx];
-                lb.items[idx].text = selectedState[idx] ? "\u2713" : "";
+            var idxs = [];
+            for (var si = 0; si < arr.length; si++) idxs.push(arr[si].index);
+            for (var j = 0; j < idxs.length; j++) {
+                var idx = idxs[j];
+                selectedState[idx] = value;
+                lb.items[idx].text = value ? "\u2713" : "";
             }
+            // ScriptUI doesn't repaint selected rows until the selection
+            // changes — bounce it to force the checkmark column to refresh.
+            try { lb.selection = null; lb.selection = idxs; } catch (eSel) {}
         }
 
         var btnGrp = win.add("group");
         btnGrp.orientation = "row"; btnGrp.alignment = ["fill", "bottom"];
         var spacer = btnGrp.add("statictext", undefined, ""); spacer.alignment = ["fill", "center"];
-        var btnToggle = btnGrp.add("button", undefined, "Toggle Selected"); btnToggle.preferredSize = [130, 28];
-        var btnCancel = btnGrp.add("button", undefined, "Cancel");          btnCancel.preferredSize = [80, 28];
-        var btnOk     = btnGrp.add("button", undefined, "Re-render");       btnOk.preferredSize     = [110, 28];
+        var btnEnable  = btnGrp.add("button", undefined, "Enabled");   btnEnable.preferredSize  = [90, 28];
+        var btnDisable = btnGrp.add("button", undefined, "Disabled");  btnDisable.preferredSize = [90, 28];
+        var btnCancel  = btnGrp.add("button", undefined, "Cancel");    btnCancel.preferredSize  = [80, 28];
+        var btnOk      = btnGrp.add("button", undefined, "Re-render"); btnOk.preferredSize      = [110, 28];
 
-        btnToggle.onClick = toggleSelected;
-        btnCancel.onClick = function () { win.close(2); };
-        btnOk.onClick     = function () { win.close(1); };
+        btnEnable.onClick  = function () { setSelected(true);  };
+        btnDisable.onClick = function () { setSelected(false); };
+        btnCancel.onClick  = function () { win.close(2); };
+        btnOk.onClick      = function () { win.close(1); };
 
+        // Space still toggles a single-row selection (quickest for one row).
         win.addEventListener("keydown", function (e) {
-            if (e.keyName === "Space") { e.preventDefault(); toggleSelected(); }
+            if (e.keyName === "Space") {
+                e.preventDefault();
+                var sel = lb.selection;
+                if (!sel) return;
+                var arr = (sel.length !== undefined) ? sel : [sel];
+                for (var si = 0; si < arr.length; si++) {
+                    var idx = arr[si].index;
+                    selectedState[idx] = !selectedState[idx];
+                    lb.items[idx].text = selectedState[idx] ? "\u2713" : "";
+                }
+            }
         });
 
         if (win.show() !== 1) return null;
@@ -481,6 +515,49 @@ and runs in detect-only mode.
     }
 
     // ── Main ──────────────────────────────────────────────────────────────────
+    // Users flag a shot for re-render via a "Rerender" Checkbox Control effect
+    // on the plate precomp layer in _comp. The Confirm dialog below pre-checks
+    // only flagged shots if any exist; otherwise all rows default-checked.
+    // Successfully re-rendered shots get their checkbox auto-reset so the flag
+    // doesn't linger into the next run.
+    var RR_EFFECT_NAME = "Rerender";
+
+    // Read the Rerender checkbox on the {shot}_plate outer layer in comp.
+    // Returns false when there's no plate precomp yet, no effect, or the
+    // checkbox is unchecked. Never throws.
+    function rerenderFlagOn(comp) {
+        for (var i = 1; i <= comp.numLayers; i++) {
+            var L = comp.layer(i);
+            try {
+                if (!(L.source instanceof CompItem)) continue;
+                if (!/_plate(_OS)?$/i.test(L.source.name)) continue;
+                var eff = L.Effects.property(RR_EFFECT_NAME);
+                if (!eff) return false;
+                var cb = eff.property(1);  // index 1 = the Checkbox parameter (locale-safe)
+                if (!cb) return false;
+                return cb.value === 1 || cb.value === true;
+            } catch (e) {}
+        }
+        return false;
+    }
+
+    // Reset the Rerender checkbox on the {shot}_plate outer layer after a
+    // successful re-render. Silent no-op if the effect is missing.
+    function rerenderFlagReset(comp) {
+        for (var i = 1; i <= comp.numLayers; i++) {
+            var L = comp.layer(i);
+            try {
+                if (!(L.source instanceof CompItem)) continue;
+                if (!/_plate(_OS)?$/i.test(L.source.name)) continue;
+                var eff = L.Effects.property(RR_EFFECT_NAME);
+                if (!eff) return;
+                var cb = eff.property(1);  // index 1 = the Checkbox parameter (locale-safe)
+                if (cb) cb.setValue(0);
+                return;
+            } catch (e) {}
+        }
+    }
+
     var shotComps = collectShotComps();
     if (shotComps.length === 0) { alert("No *_comp compositions found in the project."); return; }
 
@@ -498,32 +575,57 @@ and runs in detect-only mode.
             var shotName = shotNameFromComp(comp.name);
             var isOS     = isOvercan(comp.name);
 
-            // Raw plate is flat + locked in _comp (Shot Roundtrip layout). Find
-            // it directly in _comp — the {shot}_plate precomp, if it exists,
-            // holds only reimported variants and must not be our render source.
-            var srcPlate = findPlateLayer(comp, shotName);
-            if (!srcPlate) {
+            // Render target: _comp, with only the {shot}_plate precomp layer
+            // enabled. This bakes any effects the user applied to the plate-
+            // precomp layer (degrain, stabilize, etc.) into the output. After
+            // import we disable those effects on the layer so the next pass
+            // doesn't double-apply. Need references to: the precomp (for the
+            // reimport destination), the outer precomp layer in _comp (for
+            // solo + FX disable), and the plate inside (display only).
+            var platePrecomp = ensurePlatePrecomp(comp, shotName, true);
+            if (!platePrecomp) {
                 errorLog.push(shotName + (isOS ? " [OS]" : "")
-                    + ": no plate layer found in " + comp.name + "; skipped.");
+                    + ": no " + shotName + "_plate precomp (re-run Shot Roundtrip); skipped.");
                 continue;
             }
+            var ppOuter = null;
+            for (var oi = 1; oi <= comp.numLayers; oi++) {
+                try { if (comp.layer(oi).source === platePrecomp) { ppOuter = comp.layer(oi); break; } } catch (eOi) {}
+            }
+            if (!ppOuter) {
+                errorLog.push(shotName + (isOS ? " [OS]" : "")
+                    + ": " + platePrecomp.name + " has no matching layer in " + comp.name + "; skipped.");
+                continue;
+            }
+            var srcPlate = findTopmostPlateLike(platePrecomp);
+            if (!srcPlate) {
+                errorLog.push(shotName + (isOS ? " [OS]" : "")
+                    + ": " + platePrecomp.name + " has no plate-like layer inside; skipped.");
+                continue;
+            }
+
+            var flagged = rerenderFlagOn(comp);
 
             var outName = shotName + "_" + suffix + (isOS ? "_OS" : "") + ".mov";
             var outFile = new File(fsShots.fsName + "/" + shotName + "/plate/" + outName);
 
             if (dryRun) {
                 dryRunLog.push(shotName + (isOS ? " [OS]" : "") + ": "
-                    + "would render " + comp.name + " \u2192 " + outFile.fsName
-                    + " (plate layer: " + srcPlate.source.name + ")");
+                    + "would render " + comp.name + " (solo " + platePrecomp.name + ") \u2192 " + outFile.fsName
+                    + " (plate: " + srcPlate.source.name + ")"
+                    + (flagged ? " [flagged]" : ""));
                 continue;
             }
 
             renderPlan.push({
-                comp:       comp,
-                plateLayer: srcPlate,
-                outFile:    outFile,
-                shotName:   shotName,
-                isOS:       isOS
+                comp:             comp,
+                platePrecomp:     platePrecomp,
+                platePrecompLayer: ppOuter,
+                plateLayer:       srcPlate,
+                outFile:          outFile,
+                shotName:         shotName,
+                isOS:             isOS,
+                flagged:          flagged
             });
         }
     } catch (ePrep) {
@@ -568,12 +670,10 @@ and runs in detect-only mode.
     var versionedFile = saveAsNextVersion();
     if (!versionedFile) return;
 
-    // ── Isolate plates + ensure output dirs ──────────────────────────────────
-    // Snapshot enabled-states inside each _comp so we can restore after the
-    // render. Temporarily disable every layer except the raw plate so the
-    // render output is the pristine plate — never a grade, render, or plate
-    // variant that happens to live in the {shot}_plate precomp above it.
-    // Guide layers (GUIDE_BURNIN, the DO-NOT-EDIT note) are auto-excluded.
+    // ── Isolate plate-precomp layer in _comp + ensure output dirs ──────────
+    // Snapshot _comp layer enabled-states. Solo the plate-precomp layer so
+    // the render bakes any FX the user put on it (degrain, stabilize, etc.)
+    // into the output. Guide layers are auto-excluded by AE at render time.
     app.beginUndoGroup("Re-render Plates: isolate");
     try {
         for (var pi = 0; pi < renderPlan.length; pi++) {
@@ -592,13 +692,12 @@ and runs in detect-only mode.
                     enabled: L.enabled,
                     audio:   L.audioEnabled
                 });
-                if (L !== rp.plateLayer && !L.guideLayer) {
+                if (L !== rp.platePrecompLayer && !L.guideLayer) {
                     try { L.enabled = false; } catch (eEn) {}
                     try { L.audioEnabled = false; } catch (eAu) {}
                 }
             }
-            // Raw plate is locked; enabled toggles still apply to locked layers.
-            try { rp.plateLayer.enabled = true; } catch (ePE) {}
+            try { rp.platePrecompLayer.enabled = true; } catch (ePE) {}
             rp.restoreStates = restoreStates;
         }
     } finally {
@@ -610,11 +709,11 @@ and runs in detect-only mode.
     for (var qi = 0; qi < renderPlan.length; qi++) {
         var entry = renderPlan[qi];
         try {
-            // Render the outer _comp over its workArea (= clip + handles set
-            // by Shot Roundtrip). Everything-but-plate is disabled above, so
-            // the output is the pristine raw plate.
+            // Render _comp over its workArea (clip + handles set by Shot
+            // Roundtrip). Only the plate-precomp layer is enabled (above),
+            // so any FX on that layer get baked into the output.
             var rq = proj.renderQueue.items.add(entry.comp);
-            rq.timeSpanStart    = entry.comp.workAreaStart;
+            rq.timeSpanStart    = entry.comp.workAreaStart + 0.0001;
             rq.timeSpanDuration = entry.comp.workAreaDuration;
             var om = rq.outputModule(1);
             var foundT = false;
@@ -692,64 +791,139 @@ and runs in detect-only mode.
                 try { footageItem.replace(ent.outFile); reloaded++; } catch (eRl) {}
             }
 
-            // Ensure the {shot}_plate precomp exists in _comp (create empty if
-            // this is the first reimport for the shot), then add the rendered
-            // variant inside it.
-            var platePrecomp = ensurePlatePrecomp(ent.comp, ent.shotName, false);
-            if (!platePrecomp) {
-                errorLog.push(ent.shotName + (ent.isOS ? " [OS]" : "")
-                    + ": could not create " + plateCompNameFor(ent.comp.name));
-                continue;
-            }
-            if (isFootageInComp(platePrecomp, footageItem)) {
+            // Reimported variant goes back inside the same precomp we rendered.
+            if (isFootageInComp(ent.platePrecomp, footageItem)) {
                 skipped++;
                 continue;
             }
             try {
-                var newLayer = platePrecomp.layers.add(footageItem);
-                // Render file duration = _comp.workAreaDuration (clip + handles).
-                // Drop it at workAreaStart so source-frame at handle-in lines up
-                // with comp time workAreaStart — matches import_renders.jsx's
-                // "clip+handles" alignment case.
-                try { newLayer.startTime = ent.comp.workAreaStart; } catch (eST) {}
-                newLayer.position.setValue([platePrecomp.width / 2, platePrecomp.height / 2]);
+                var newLayer = ent.platePrecomp.layers.add(footageItem);
+                // Precomp duration == render duration, so the new layer at
+                // startTime=0 fills it exactly (precomp-time 0 == source-TC
+                // fullStart via displayStartTime).
+                try { newLayer.startTime = 0; } catch (eST) {}
+                newLayer.position.setValue([ent.platePrecomp.width / 2, ent.platePrecomp.height / 2]);
                 newLayer.label = 12;
                 // Plate variants sit above existing plate-like layers but
                 // below any renders/grades — matches import_renders.jsx's
                 // stack-above-topmost-plate-like convention.
-                var plateTop = findTopmostPlateLike(platePrecomp);
+                var plateTop = findTopmostPlateLike(ent.platePrecomp);
                 if (plateTop && plateTop !== newLayer) {
                     try { newLayer.moveBefore(plateTop); } catch (eMv) {}
+                }
+                // Disable every non-guide layer BELOW the new variant so the
+                // fresh render becomes the active plate. Earlier variants stay
+                // in the stack (user can re-enable if they want to roll back).
+                for (var lb = newLayer.index + 1; lb <= ent.platePrecomp.numLayers; lb++) {
+                    var bL = ent.platePrecomp.layer(lb);
+                    if (bL.guideLayer) continue;
+                    try { bL.enabled      = false; } catch (eDisE) {}
+                    try { bL.audioEnabled = false; } catch (eDisA) {}
+                }
+
+                // Disable every effect on the plate-precomp layer in _comp —
+                // they've been baked into the newly-rendered variant, so
+                // leaving them live would double-apply on the next pass (e.g.
+                // degraining the already-degrained plate). Keep the "Rerender"
+                // Checkbox Control so the flag UX still works.
+                if (ent.platePrecompLayer) {
+                    try {
+                        var effs = ent.platePrecompLayer.Effects;
+                        for (var ei = 1; ei <= effs.numProperties; ei++) {
+                            var eff = effs.property(ei);
+                            if (eff && eff.name === RR_EFFECT_NAME) continue;
+                            try { eff.enabled = false; } catch (eDisFX) {}
+                        }
+                    } catch (eEffs) {}
                 }
             } catch (eAdd) {
                 errorLog.push(ent.shotName + (ent.isOS ? " [OS]" : "")
                     + ": failed to add layer — " + eAdd.message);
             }
+
+            // Auto-reset the Rerender checkbox on success so the flag doesn't
+            // linger into the next run. Silent no-op if the effect is missing.
+            if (ent.flagged) { rerenderFlagReset(ent.comp); }
         }
     }
     app.endUndoGroup();
 
     // ── Summary ───────────────────────────────────────────────────────────────
-    var queued    = renderPlan.length - queueErrors.length;
-    var msg = "Comps scanned:       " + shotComps.length + "\n"
-            + "Plates queued:       " + queued + "\n"
-            + "Rendered + imported: " + imported + "\n"
-            + "Reloaded (overwrite):" + reloaded + "\n"
-            + "Already in precomp:  " + skipped;
-    if (versionedFile) {
-        msg += "\n\nWorking in:          " + versionedFile.name
-             + "\n(original preserved on disk as the rollback point)";
-    }
-    if (queueErrors.length > 0) {
-        msg += "\n\nQueue errors:";
-        for (var qe = 0; qe < queueErrors.length; qe++) msg += "\n  " + queueErrors[qe];
-    }
-    if (errorLog.length > 0) {
-        msg += "\n\nErrors / warnings:";
-        for (var er = 0; er < errorLog.length; er++) msg += "\n  " + errorLog[er];
-    }
+    var queued = renderPlan.length - queueErrors.length;
+    showSummaryStructured("Re-render Plates Complete", {
+        stats: [
+            ["Comps scanned:",        shotComps.length],
+            ["Plates queued:",        queued],
+            ["Rendered + imported:",  imported],
+            ["Reloaded (overwrite):", reloaded],
+            ["Already in precomp:",   skipped]
+        ],
+        workingIn:   versionedFile ? versionedFile.displayName : null,
+        queueErrors: queueErrors,
+        errors:      errorLog
+    });
 
-    showSummary("Re-render Plates Complete", msg);
+    function showSummaryStructured(title, data) {
+        var dlg = new Window("dialog", title);
+        dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
+        dlg.spacing = 10; dlg.margins = 14;
+
+        var LABEL_W = 170;
+        var statsPnl = dlg.add("panel", undefined, "Summary");
+        statsPnl.orientation = "column";
+        statsPnl.alignChildren = ["fill", "top"];
+        statsPnl.margins = [12, 12, 12, 12]; statsPnl.spacing = 4;
+        for (var si = 0; si < data.stats.length; si++) {
+            var row = statsPnl.add("group");
+            row.orientation = "row"; row.alignChildren = ["left", "center"]; row.spacing = 8;
+            var lbl = row.add("statictext", undefined, data.stats[si][0]);
+            lbl.preferredSize = [LABEL_W, 18];
+            row.add("statictext", undefined, String(data.stats[si][1]));
+        }
+
+        if (data.workingIn) {
+            var fPnl = dlg.add("panel", undefined, "File");
+            fPnl.orientation = "column";
+            fPnl.alignChildren = ["fill", "top"];
+            fPnl.margins = [12, 12, 12, 12]; fPnl.spacing = 4;
+            var fRow = fPnl.add("group");
+            fRow.orientation = "row"; fRow.alignChildren = ["left", "center"]; fRow.spacing = 8;
+            var fLbl = fRow.add("statictext", undefined, "Working in:");
+            fLbl.preferredSize = [LABEL_W, 18];
+            fRow.add("statictext", undefined, data.workingIn);
+            fPnl.add("statictext", undefined, "Original preserved on disk as the rollback point.");
+        }
+
+        var hasErrs = (data.queueErrors && data.queueErrors.length > 0) ||
+                      (data.errors      && data.errors.length      > 0);
+        if (hasErrs) {
+            var ePnl = dlg.add("panel", undefined, "Errors / warnings");
+            ePnl.orientation = "column";
+            ePnl.alignChildren = ["fill", "top"];
+            ePnl.margins = [12, 12, 12, 12]; ePnl.spacing = 4;
+            var body = "";
+            if (data.queueErrors && data.queueErrors.length > 0) {
+                body += "Queue errors:\n";
+                for (var qi2 = 0; qi2 < data.queueErrors.length; qi2++) body += "  " + data.queueErrors[qi2] + "\n";
+                if (data.errors && data.errors.length > 0) body += "\n";
+            }
+            if (data.errors) {
+                for (var ei2 = 0; ei2 < data.errors.length; ei2++) body += "  " + data.errors[ei2] + "\n";
+            }
+            var lines = body.split("\n").length;
+            var maxH  = $.screens[0].bottom - $.screens[0].top - 360;
+            var textH = Math.min(Math.max(lines * 15 + 10, 60), maxH);
+            var txt = ePnl.add("edittext", undefined, body,
+                { multiline: true, readonly: true, scrollable: true });
+            txt.preferredSize = [460, textH];
+        }
+
+        var btnRow = dlg.add("group");
+        btnRow.alignment = ["right", "bottom"];
+        var ok = btnRow.add("button", undefined, "OK"); ok.preferredSize = [80, 28];
+        ok.onClick = function () { dlg.close(); };
+        dlg.show();
+    }
 
     function showSummary(title, body) {
         var sumDlg = new Window("dialog", title);
