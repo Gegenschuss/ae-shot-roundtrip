@@ -108,6 +108,10 @@ Every tool in this panel is a step in the same round trip:
 
 The handles are what make this work. Clients request last-minute edit changes before delivery, so every shot carries extra frames on each side. The Premiere extension trims them back to the editorial cut, and if the cut shifts, the frames are already there.
 
+<img src="docs/before_after_roundtrip.png" width="720" alt="Main comp before and after Shot Roundtrip">
+
+*Main comp before / after Shot Roundtrip — a mix of direct footage, retimed clips, and precomps collapses into a clean stack of `shot_NNN_container` layers, one per shot.*
+
 ### Editing the edit after AE has started
 
 Clients will ask for new shots, dropped shots, or reordered shots after AE
@@ -169,6 +173,13 @@ work is underway. The pipeline is designed around this:
   project panel reads shot-by-shot instead of keeping AE's auto-generated
   `"X.mov Comp 1"` names. All Dynamic Link wrappers land in
   `/Shots/dynamicLink/`.
+
+  On disk, the `Roundtrip/` folder mirrors the project-panel layout: one
+  folder per shot containing `plate/`, `render/`, plus the per-shot
+  `.nk` Nuke script alongside an AppendClip master at the root.
+
+  <img src="docs/roundtrip_folder.png" width="260" alt="Roundtrip folder layout on disk">
+
 
   **Auto shot numbering** (default: on). Ticking the **Auto** checkbox
   next to Start Number makes the roundtrip pick each shot's number from
