@@ -425,6 +425,21 @@ work is underway. The pipeline is designed around this:
   can strip them out. This rebuilds them from the existing shot comps so
   you can reconstruct the Premiere edit without re-running the full
   roundtrip. Prompts for a handle-frame count (default 50).
+- **Apply Burnin Mode** — Reads the **Burnin CTRL** null that Shot Roundtrip
+  drops into mainComp and pushes its state to every shot's Guide Burnin
+  layer. The CTRL has two Checkbox Control effects:
+  - **Show** — live cross-comp expression on every Guide Burnin's
+    opacity. Toggle it and all shot burnins hide or reappear
+    instantly in AE's viewer.
+  - **Render** — not expression-driven (AE's `guideLayer` flag isn't
+    animatable). Flip it and run this helper to push the new state
+    across every `_comp`: `Render = ON` clears the guide flag so the
+    burnin bakes into renders; `Render = OFF` restores guide-only
+    (the default, visible in AE but excluded from renders).
+
+  Open the main comp before running. The CTRL is created automatically
+  by Shot Roundtrip; if it's missing, re-run Shot Roundtrip on that
+  project and it'll appear. Runs in one undo step.
 - **Reverse Stretch → Remap** *(Little Toolbox)* — For each selected
   layer with negative stretch, rewrites the reversal as an equivalent
   time remap: stretch back to `100`, time remap enabled, and two

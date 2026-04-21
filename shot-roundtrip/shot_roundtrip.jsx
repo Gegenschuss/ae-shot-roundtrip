@@ -1109,7 +1109,21 @@ NOTES
             txtDoc.justification = ParagraphJustification.LEFT_JUSTIFY; txtProp.setValue(txtDoc);
             txtLayer.property("Anchor Point").setValue([0,0]); txtLayer.position.setValue([100, 200]);
             var expr = "sName = '" + shotName + "';\r" + "cutFrame = " + cutFrame1001 + ";\r" + "fullStart = " + fullRenderStart + ";\r" + "handles = " + handleFrames + ";\r" + "\r" + "renderStartFrame = cutFrame - handles;\r" + "timeSinceStart = time - fullStart;\r" + "framesSinceStart = Math.round(timeSinceStart / thisComp.frameDuration);\r" + "finalFrame = renderStartFrame + framesSinceStart;\r" + "\r" + "sName + '\\r' + 'Frame: ' + finalFrame;";
-            txtLayer.property("Source Text").expression = expr; txtLayer.locked = true;
+            txtLayer.property("Source Text").expression = expr;
+
+            // Opacity expression driven by the "Burnin CTRL" null in mainComp
+            // (created once at roundtrip time). try/catch fallback to 100 so
+            // legacy projects without a CTRL stay visible. First cross-comp
+            // expression in the pipeline — keep the main comp's name stable
+            // (renaming it breaks the lookup).
+            try {
+                var mcn = (mainComp && mainComp.name) ? mainComp.name : "";
+                var safeN = String(mcn).replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+                var opExpr = 'try { comp("' + safeN + '").layer("Burnin CTRL").effect("Show")("Checkbox").value == 1 ? 100 : 0 } catch (e) { 100 }';
+                txtLayer.property("ADBE Transform Group").property("ADBE Opacity").expression = opExpr;
+            } catch (eOpX) {}
+
+            txtLayer.locked = true;
         }
 
         // Mirror the comp's "cut in"/"cut out" markers onto the locked
@@ -2361,6 +2375,32 @@ NOTES
             for (var ei = 1; ei <= proj.numItems; ei++) {
                 if (proj.item(ei) instanceof CompItem) existingCompNames[proj.item(ei).name] = true;
             }
+
+            // Burnin CTRL null in mainComp — one source of truth for Guide
+            // Burnin visibility / render state across every shot.
+            //   "Show"   (Checkbox Control, default ON)  → drives Opacity
+            //     expression on each Guide Burnin (live, cross-comp).
+            //   "Render" (Checkbox Control, default OFF) → read by the
+            //     "Apply Burnin Mode" helper to flip guideLayer across all
+            //     shot _comps (guideLayer is a boolean flag, not animatable,
+            //     so it needs a script pass — not live).
+            // Skipped if the CTRL already exists from a prior run.
+            try {
+                var ctrl = mainComp.layers.byName("Burnin CTRL");
+                if (!ctrl) {
+                    ctrl = mainComp.layers.addNull();
+                    ctrl.name       = "Burnin CTRL";
+                    ctrl.guideLayer = true;
+                    ctrl.label      = 16; // matching Guide Burnin label for recognisability
+                    try { ctrl.moveToEnd(); } catch (eMvE) {}
+                    var showFx  = ctrl.Effects.addProperty("ADBE Checkbox Control");
+                    showFx.name = "Show";
+                    try { showFx.property(1).setValue(1); } catch (eShV) {}
+                    var renderFx = ctrl.Effects.addProperty("ADBE Checkbox Control");
+                    renderFx.name = "Render";
+                    try { renderFx.property(1).setValue(0); } catch (eRnV) {}
+                }
+            } catch (eCtrl) {}
 
             // Clear the AE render queue so leftover items from prior runs
             // (partial renders, user-added comps, previous roundtrip passes)

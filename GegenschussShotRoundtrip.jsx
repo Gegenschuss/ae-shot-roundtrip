@@ -65,6 +65,12 @@
         },
         {
             group:  "Helpers",
+            label:  "Apply Burnin Mode",
+            tip:    "Read the \"Render\" checkbox on the Burnin CTRL null in mainComp and push its state to every shot's Guide Burnin (guideLayer on = guide only, off = rendered).",
+            file:   "helpers/apply_burnin_mode.jsx"
+        },
+        {
+            group:  "Helpers",
             label:  "Create dynamicLink Comps",
             tip:    "Standalone dynamicLink builder. Prompts for handle frames, then for each selected precomp or footage layer creates a wrapper comp with full cut+2\u00d7handles duration (black padded) in /Shots/dynamicLink.",
             file:   "create-dynamiclink-comps/create_dynamiclink_comps.jsx"
