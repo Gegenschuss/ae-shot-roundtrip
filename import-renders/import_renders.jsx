@@ -693,11 +693,6 @@ optional flat _grade/ folder for Resolve returns:
             // import before hiding the source — see the README "Tools →
             // Import Returns" block for the reasoning.
 
-            // Keep Guide Burnin on top. Lives on the outer shotComp; the
-            // inner _stack precomp has no burn-in, so look up on comp.
-            var bl = comp.layers.byName("Guide Burnin");
-            if (bl) { bl.locked = false; bl.moveToBeginning(); bl.locked = true; }
-
             if (addedAny) compsWithNewRenders.push(shotName);
         }
 

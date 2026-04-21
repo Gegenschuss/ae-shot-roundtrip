@@ -425,16 +425,41 @@ work is underway. The pipeline is designed around this:
   can strip them out. This rebuilds them from the existing shot comps so
   you can reconstruct the Premiere edit without re-running the full
   roundtrip. Prompts for a handle-frame count (default 50).
-- **Burnin CTRL** *(mainComp text layer, not a separate tool)* — Shot
-  Roundtrip drops a yellow **Burnin CTRL** text layer in mainComp with a
-  live expression that reads from a **Burnin Fields** precomp and shows
-  `Project: X / Production Company: Y / Agency: Z / Client: W / <shot> /
-  src f<N> @ <TC> / tl f<N> @ <TC>` for the shot under the playhead. The
-  `src` pair is the shot's own frame number (1001 at cut-in, Nuke
-  convention) and source-relative timecode; the `tl` pair is the
-  mainComp timeline frame and timecode at the current playhead.
+- **Burnin** *(mainComp overlay, not a separate tool)* — Toggled by the
+  `☑ Include Burnin` checkbox at the top of the Burnin settings panel
+  (default on). When off, Shot Roundtrip skips creating both the Burnin
+  Fields precomp and the Burnin overlay; the four field rows stay
+  visible regardless so you can prep values without toggling the
+  master switch first. When on, Shot Roundtrip builds a **Burnin**
+  precomp at mainComp dimensions and drops it on top of mainComp as
+  the outermost layer. Five text zones with matching per-text BG
+  solids (sized to hug each text via `sourceRectAtTime`):
 
-  **Burnin Fields** (precomp, lives in `/Shots/`) — four named text layers:
+  | Zone | Content | Source |
+  |---|---|---|
+  | Top-left      | `X ⎮ PRODUCTION COMPANY: Y`           | Burnin Fields (live) |
+  | Top-right     | `AGENCY: Z ⎮ CLIENT: W`               | Burnin Fields (live) |
+  | Bottom-left   | `SRC F<n> @ <TC>`                      | live shot lookup into mainComp |
+  | Bottom-centre | `SHOT_NAME`                            | live shot lookup into mainComp |
+  | Bottom-right  | `TL F<n> @ <TC>`                       | mainComp timeline frame / TC |
+
+  Text: fixed **48pt bold Source Code Pro monospace** at every
+  resolution (Vimeo scales UHD down in-browser — larger source text
+  ends up visually heavy on the downsample; 48pt reads cleanly at both
+  HD and UHD). Source Code Pro ships with Adobe CC so it's on every
+  AE install; no digit jitter as TCs change. Uppercase, pipe separator.
+  Margins / Vimeo safe-zone / logo still scale off comp height so the
+  layout stays proportional on UHD. `SRC` frames start at 1001 (Nuke
+  convention) at the shot's cut-in.
+
+  The bottom zone is shifted up by ~80px (at 1080p) to leave clearance
+  for **Vimeo's playback controls** — reviewer's scrubber / timecode /
+  fullscreen button overlay the lower ~60px of the frame on vimeo.com,
+  so placing the burnin there would hide it under the controls.
+
+
+  **Burnin Fields** (precomp, lives in `/Shots/`) — four named text layers
+  the corner expressions read from:
   - **Project** (default: the `.aep` filename)
   - **Production Company** (default: `Gegenschuss`)
   - **Agency**
@@ -445,13 +470,13 @@ work is underway. The pipeline is designed around this:
   comp (so re-runs show the current values and won't clobber your edits)
   and writes the values back on Run. You can also open Burnin Fields
   directly at any time and edit each text layer's Source Text — the
-  CTRL's live preview picks up the change immediately. Blank fields are
-  skipped in the composed burnin.
+  Burnin precomp's live preview picks up the change immediately. Blank
+  fields are skipped in the composed burnin.
 
-  To control visibility / render-inclusion, toggle `guideLayer` and
-  `enabled` on the CTRL text layer manually in AE's UI. There's no
-  helper to push state across shots — the CTRL lives in mainComp
-  because that's where the render output comes from.
+  To keep the burnin out of renders, toggle `guideLayer` / `enabled`
+  on the Burnin layer in mainComp (or on individual layers inside the
+  Burnin precomp) manually. No helper script — mainComp is the render
+  target, so configuration lives there.
 - **Reverse Stretch → Remap** *(Little Toolbox)* — For each selected
   layer with negative stretch, rewrites the reversal as an equivalent
   time remap: stretch back to `100`, time remap enabled, and two

@@ -253,6 +253,17 @@ NOTES
         pnlBurnin.orientation = "column"; pnlBurnin.alignChildren = ["fill", "top"];
         pnlBurnin.spacing = 6; pnlBurnin.margins = [10, 15, 10, 10];
 
+        // Master "Include Burnin" checkbox at the top of the panel.
+        // When unchecked, the roundtrip skips creating both the Burnin
+        // Fields precomp and the Burnin overlay on mainComp. The field
+        // rows stay visible regardless so the user can prep values
+        // without toggling the master switch first.
+        var gBurninOn = pnlBurnin.add("group");
+        gBurninOn.orientation = "row"; gBurninOn.alignChildren = ["left", "center"]; gBurninOn.spacing = 8;
+        gBurninOn.add("statictext", undefined, "").preferredSize = [140, FIELD_H];
+        var chkBurninEnabled = gBurninOn.add("checkbox", undefined, "Include Burnin");
+        chkBurninEnabled.value = true;
+
         function addBurninRow(parent, labelText) {
             var g = parent.add("group");
             g.orientation = "row"; g.alignChildren = ["left", "center"]; g.spacing = 8;
@@ -266,6 +277,7 @@ NOTES
         var etBurninCompany = addBurninRow(pnlBurnin, "Production Company:");
         var etBurninAgency  = addBurninRow(pnlBurnin, "Agency:");
         var etBurninClient  = addBurninRow(pnlBurnin, "Client:");
+
 
 
         // ── Settings persistence ───────────────────────
@@ -286,9 +298,10 @@ NOTES
             sharedSourceMode:  "separate",
             overscan:      "10",
             omTemplate:    "ProRes 422 HQ",
-            shotsFolder:   "../Roundtrip",
+            shotsFolder:   "/Roundtrip",
             // Burnin fields — empty project falls back to the .aep filename
             // stem at apply-time (see srApply). Company seeded to "Gegenschuss".
+            burninEnabled:  "true",
             burninProject:  "",
             burninCompany:  "Gegenschuss",
             burninAgency:   "",
@@ -324,6 +337,7 @@ NOTES
             var projStemForBurn = (app.project.file && app.project.file.displayName)
                                 ? app.project.file.displayName.replace(/\.aep$/i, "")
                                 : "Project";
+            if ("burninEnabled" in s) chkBurninEnabled.value = (s.burninEnabled === "true" || s.burninEnabled === true);
             if ("burninProject" in s) etBurninProject.text = s.burninProject && s.burninProject.length > 0 ? s.burninProject : projStemForBurn;
             if ("burninCompany" in s) etBurninCompany.text = s.burninCompany;
             if ("burninAgency"  in s) etBurninAgency.text  = s.burninAgency;
@@ -342,6 +356,7 @@ NOTES
             overscan:       srLoad("overscan",       SR_DEFAULTS.overscan),
             omTemplate:     srLoad("omTemplate",     SR_DEFAULTS.omTemplate),
             shotsFolder:    srLoad("shotsFolder",    SR_DEFAULTS.shotsFolder),
+            burninEnabled:  srLoad("burninEnabled",  SR_DEFAULTS.burninEnabled),
             burninProject:  srLoad("burninProject",  SR_DEFAULTS.burninProject),
             burninCompany:  srLoad("burninCompany",  SR_DEFAULTS.burninCompany),
             burninAgency:   srLoad("burninAgency",   SR_DEFAULTS.burninAgency),
@@ -400,6 +415,7 @@ NOTES
             srSave("overscan",      etOverscan.text);
             srSave("omTemplate",    etOM.text);
             srSave("shotsFolder",   etShotsFolder.text);
+            srSave("burninEnabled", chkBurninEnabled.value);
             srSave("burninProject", etBurninProject.text);
             srSave("burninCompany", etBurninCompany.text);
             srSave("burninAgency",  etBurninAgency.text);
@@ -1179,87 +1195,6 @@ NOTES
 
 
 
-        function addGuideBurnIn(comp, shotName, cutFrame1001, fullRenderStart, handleFrames, mainTlAtCutIn) {
-            // Shot `_comp` burnin is strictly technical — shot name + live
-            // source frame/TC + mainComp timeline frame/TC. No fields, no BG
-            // (those are the editor-facing CTRL in mainComp). Keep leading
-            // at AE's "Auto" via the two-step setValue dance.
-            var txtLayer = comp.layers.byName("Guide Burnin");
-            if (!txtLayer) { txtLayer = comp.layers.addText(shotName); txtLayer.name = "Guide Burnin"; }
-            txtLayer.locked = false; txtLayer.guideLayer = true; txtLayer.label = 16;
-            var txtProp = txtLayer.property("Source Text");
-            // Clear any stale expression so setValue takes effect.
-            try { txtProp.expression = ""; } catch (eCX) {}
-
-            var existingFont = null;
-            try { existingFont = txtProp.value.fontFamily; } catch (eEF) {}
-            txtProp.setValue(new TextDocument(shotName));
-            var dDoc = txtProp.value;
-            dDoc.fontSize = 48;
-            if (existingFont) { try { dDoc.fontFamily = existingFont; } catch (eDFF) {} }
-            dDoc.fillColor = [1, 1, 1];
-            dDoc.justification = ParagraphJustification.LEFT_JUSTIFY;
-            txtProp.setValue(dDoc);
-            txtLayer.property("Anchor Point").setValue([0, 0]);
-            txtLayer.position.setValue([100, 150]);
-
-            // Remove any legacy Guide Burnin BG — shot comps are artist-
-            // facing now, no darkened backdrop needed.
-            var staleBg = comp.layers.byName("Guide Burnin BG");
-            if (staleBg) { try { staleBg.locked = false; staleBg.remove(); } catch (eRmBg) {} }
-
-            txtLayer.moveToBeginning();
-            // One-line burnin: shot / src f<N> @ <TC> / tl f<N> @ <TC>.
-            // Technical-only; the editor-facing CTRL in mainComp carries the
-            // project / company / agency / client fields. `mainTlAtCutIn` is
-            // the shot's layer.inPoint in mainComp — baked here because the
-            // _comp can't reach mainComp from expression scope.
-            var mtl = (typeof mainTlAtCutIn === "number" && !isNaN(mainTlAtCutIn)) ? mainTlAtCutIn : 0;
-            var expr = "var sName = '" + shotName + "';\r"
-                     + "var cutFrame = " + cutFrame1001 + ";\r"
-                     + "var fullStart = " + fullRenderStart + ";\r"
-                     + "var handles = " + handleFrames + ";\r"
-                     + "var mainTlAtCutIn = " + mtl + ";\r"
-                     + "\r"
-                     + "var renderStartFrame = cutFrame - handles;\r"
-                     + "var timeSinceStart = time - fullStart;\r"
-                     + "var framesSinceStart = Math.round(timeSinceStart / thisComp.frameDuration);\r"
-                     + "var finalFrame = renderStartFrame + framesSinceStart;\r"
-                     + "\r"
-                     + "var fps = 1 / thisComp.frameDuration;\r"
-                     + "var handleSec = handles / thisComp.frameRate;\r"
-                     + "var cutStartSec = fullStart + handleSec;\r"
-                     + "var layerT = time - cutStartSec;\r"
-                     + "var srcTC = timeToTimecode(layerT, fps, false);\r"
-                     + "var tlTimeSec = mainTlAtCutIn + layerT;\r"
-                     + "if (tlTimeSec < 0) tlTimeSec = 0;\r"
-                     + "var tlFrame = Math.floor(tlTimeSec / thisComp.frameDuration);\r"
-                     + "var tlTC = timeToTimecode(tlTimeSec, fps, false);\r"
-                     + "\r"
-                     + "sName + ' / src f' + finalFrame + ' @ ' + srcTC + ' / tl f' + tlFrame + ' @ ' + tlTC;";
-            txtLayer.property("Source Text").expression = expr;
-
-            // Clear any live Opacity expression that earlier builds may have
-            // left here — Burnin CTRL is script-applied (not live) to avoid
-            // confusion about what's actually rendered.
-            try { txtLayer.property("ADBE Transform Group").property("ADBE Opacity").expression = ""; } catch (eOpX) {}
-
-            txtLayer.locked = true;
-        }
-
-        // Mirror the comp's "cut in"/"cut out" markers onto the locked
-        // Guide Burnin layer. AE prevents editing marker keys on a locked
-        // layer, so this gives the cut markers UI-level protection on top of
-        // the protectedRegion flag (which only guards against time-remap drift).
-        function addGuideBurnInMarkers(comp, cutInSec, cutOutSec) {
-            var gl = comp.layers.byName("Guide Burnin");
-            if (!gl) return;
-            gl.locked = false;
-            var mp = gl.property("Marker");
-            mp.setValueAtTime(cutInSec,  cutMarker("cut in"));
-            mp.setValueAtTime(cutOutSec, cutMarker("cut out"));
-            gl.locked = true;
-        }
 
         // ------------------------------------------------
         // EXECUTION — collect layers, build comps, render
@@ -1277,7 +1212,6 @@ NOTES
         var handleFrames = parseInt(etHandles.text, 10);
         var overscanPercent = parseFloat(etOverscan.text); if(isNaN(overscanPercent)) overscanPercent=0;
         var omTemplate = etOM.text;
-        var useNukeStart = true;
         var increment = parseInt(etIncrement.text, 10);
         if (isNaN(increment) || increment < 1) increment = 10;
 
@@ -2624,15 +2558,6 @@ NOTES
                 shotComp.markerProperty.setValueAtTime(cutStart, cutMarker("cut in"));
                 shotComp.markerProperty.setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
 
-                var cutFrame = useNukeStart ? 1001 : 0;
-                // layer.inPoint is the shot's CUT-IN position in mainComp —
-                // baked into the Guide Burnin's expression so it can compute
-                // timeline frame / TC without reaching out to mainComp.
-                var mainTlAtCutIn = 0;
-                try { mainTlAtCutIn = (typeof layer.inPoint === "number") ? layer.inPoint : 0; } catch (eML) {}
-                addGuideBurnIn(shotComp, shotName, cutFrame, fullStart, actualLeadingHandles, mainTlAtCutIn);
-                addGuideBurnInMarkers(shotComp, cutStart, cutStart + cutDuration);
-
                 // ── Path-specific: precomp vs. direct footage ──────────────────
                 var containerDurFrames;
                 if (isPrecomp) {
@@ -2862,7 +2787,6 @@ NOTES
                     } catch(eTrim) {}
 
                     var precompSrc = layer.source;
-                    var blPC = shotComp.layers.byName("Guide Burnin"); if (blPC) { blPC.locked=false; blPC.moveToBeginning(); blPC.locked=true; }
                     containerDurFrames = Math.round(precompSrc.duration * safeFPS);
 
                 } else {
@@ -2947,8 +2871,6 @@ NOTES
                         plateInner.property("Marker").setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
                         containerInner.property("Marker").setValueAtTime(cutStart,               cutMarker("cut in"));
                         containerInner.property("Marker").setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
-                        var blDirect = shotComp.layers.byName("Guide Burnin");
-                        if (blDirect) { blDirect.locked = false; blDirect.moveToBeginning(); blDirect.locked = true; }
 
                         // Overscan: containerInner's anchor was set for source-sized
                         // footage, but shotComp is osWidth × osHeight. Shift to
@@ -3040,24 +2962,24 @@ NOTES
                     // uses the comp's LOCAL (0-based) time regardless of
                     // displayStartTime. The stack comp runs 0..fullDurationSec
                     // internally, so cut-in lands at handleSec and cut-out at
-                    // handleSec+cutDuration. (Earlier builds passed absolute
-                    // cutStart here assuming displayed-time semantics; that
-                    // placed markers out of range.)
+                    // handleSec+cutDuration.
                     var cutInLocal  = cutStart - fullStart;   // = handleSec
                     var cutOutLocal = cutInLocal + cutDuration;
                     try { stackComp.markerProperty.setValueAtTime(cutInLocal,  cutMarker("cut in"));  } catch (eMkIn)  {}
                     try { stackComp.markerProperty.setValueAtTime(cutOutLocal, cutMarker("cut out")); } catch (eMkOut) {}
 
-                    // "Do not modify" notice marker at the very start of the
-                    // stack comp — local time 0. Protected so AE's own
-                    // time-remap / split-layer operations don't drift it.
+                    // "Do not modify" notice — a locked red null pinned to
+                    // the bottom of the stack so the warning is visible but
+                    // doesn't clutter the time ruler.
                     try {
-                        var noticeMarker = new MarkerValue(
-                            "Managed by Gegenschuss Shot Roundtrip \u2014 do not modify. Reimported variants land here automatically."
-                        );
-                        noticeMarker.protectedRegion = true;
-                        stackComp.markerProperty.setValueAtTime(0, noticeMarker);
-                    } catch (eNM) {}
+                        var noticeNull = stackComp.layers.addNull(stackComp.duration);
+                        noticeNull.name       = "Managed by Gegenschuss Shot Roundtrip \u2014 do not modify";
+                        noticeNull.label      = 1;     // Red
+                        noticeNull.guideLayer = true;  // never rendered
+                        noticeNull.comment    = "Reimported variants (renders, grades) land here automatically. Any changes to this stack precomp will be overwritten by Shot Roundtrip.";
+                        noticeNull.moveToEnd();
+                        noticeNull.locked     = true;
+                    } catch (eNull) {}
 
                     // Outer layer spans fullStart..fullStart+fullDurationSec so
                     // _comp-time = source-time identity still holds (render
@@ -3086,11 +3008,6 @@ NOTES
                         var rrEff = ppLayer.Effects.addProperty("ADBE Checkbox Control");
                         rrEff.name = "Re-render";
                     } catch (eRR) {}
-
-                    // Guide Burnin stays on top — both if/else branches above
-                    // already placed it at layer 1; re-assert after our insert.
-                    var blTop = shotComp.layers.byName("Guide Burnin");
-                    if (blTop) { blTop.locked = false; blTop.moveToBeginning(); blTop.locked = true; }
                 } catch (ePlatePC) {
                     reportError("PLATE-PRECOMP", ePlatePC, "Plate precomp creation failed for " + shotName);
                 }
@@ -3211,6 +3128,7 @@ NOTES
 
         app.beginUndoGroup("Roundtrip Finish");
         try {
+         if (chkBurninEnabled.value) {
             // Burnin Fields precomp — a single project-wide comp holding four
             // named text layers (Project, Production Company, Agency, Client).
             // The user edits Source Text on each layer to fill in the burnin
@@ -3272,192 +3190,290 @@ NOTES
                 }
             } catch (eFC) {}
 
-            // Burnin CTRL text layer in mainComp — live preview of the
-            // current shot + prefix composed from Burnin Fields. All state
-            // on the CTRL (Show / Render / Font Size) is SCRIPT-APPLIED:
-            // edit the fields / CTRL effects, then run Helpers → Apply
-            // Burnin Mode to push to every shot. The on-screen preview is
-            // live so you can see the burnin in the edit.
-            //
-            // Created here (after the shot loop) so it doesn't shift mainComp
-            // indices that the loop's stored `mainLayerIdx` values rely on.
-            // Legacy CTRLs (nulls, or text layers from earlier builds) get
-            // torn down and rebuilt so the fields-precomp lookup works.
-            function buildCtrlExpr() {
-                // NOTE: AE expressions auto-unwrap sourceText to a String.
-                // `L.text.sourceText + ""` is the right way to coerce;
-                // `.value.text` doesn't exist in expression DOM.
-                return [
-                    "var fc = null;",
-                    "try { fc = comp('Burnin Fields'); } catch(e) {}",
-                    "function readF(n) {",
-                    "    try { return fc.layer(n).text.sourceText + ''; }",
-                    "    catch(e) { return ''; }",
-                    "}",
-                    "var botParts = [];",
-                    "if (fc) {",
-                    "    var p = readF('Project');            if (p)  botParts.push('Project: ' + p);",
-                    "    var c = readF('Production Company'); if (c)  botParts.push('Production Company: ' + c);",
-                    "    var a = readF('Agency');             if (a)  botParts.push('Agency: ' + a);",
-                    "    var cl = readF('Client');            if (cl) botParts.push('Client: ' + cl);",
-                    "}",
-                    "var shotName = '';",
-                    "var layerT = 0;",
-                    "var t = time;",
-                    "for (var i = 1; i <= thisComp.numLayers; i++) {",
-                    "    var L = thisComp.layer(i);",
-                    "    if (L === thisLayer) continue;",
-                    "    if (!L.enabled) continue;",
-                    "    if (L.inPoint > t) continue;",
-                    "    if (L.outPoint <= t) continue;",
-                    "    try {",
-                    "        var nm = L.source.name;",
-                    "        var m = nm.match(/^(.+?)_(container|comp)(_OS)?$/i);",
-                    "        if (m) {",
-                    "            shotName = m[1];",
-                    "            // layer.inPoint is the CUT-IN in mainComp; layerT = 0 at cut-in.",
-                    "            // (For containers, startTime and inPoint differ — inPoint is the one",
-                    "            // that lines the shotFrame up with the _comp Guide Burnin's 1001-at-cut-in.)",
-                    "            layerT = t - L.inPoint;",
-                    "            break;",
-                    "        }",
-                    "    } catch(e) {}",
-                    "}",
-                    "var fps = 1 / thisComp.frameDuration;",
-                    "var shotFrame = Math.round(layerT / thisComp.frameDuration) + 1001;",
-                    "var srcTC = timeToTimecode(layerT, fps, false);",
-                    "var tlFrame = Math.floor(t / thisComp.frameDuration);",
-                    "var tlTC = timeToTimecode(t, fps, false);",
-                    "var topParts = [];",
-                    "if (shotName) {",
-                    "    topParts.push(shotName);",
-                    "    topParts.push('src f' + shotFrame + ' @ ' + srcTC);",
-                    "    topParts.push('tl f' + tlFrame + ' @ ' + tlTC);",
-                    "}",
-                    "var line1 = topParts.join(' / ');",
-                    "var line2 = botParts.join(' / ');",
-                    "(line1 && line2) ? line1 + '\\n' + line2 : (line1 ? line1 : (line2 ? line2 : 'Burnin CTRL'));"
-                ].join("\n");
-            }
+            // Zoned burnin — "Burnin" precomp sized to mainComp, layered on
+            // top. Four text layers at the frame's corners:
+            //   TL: PROJECT | PRODUCTION COMPANY           (top-left)
+            //   TR: AGENCY | CLIENT                        (top-right)
+            //   BL: SHOT | SRC F<N> @ <TC>                 (bottom-left)
+            //   BR: TL F<N> @ <TC>                         (bottom-right)
+            // Plus two full-width semi-transparent strips at top / bottom
+            // to keep the text readable over any footage.
+            // All text uppercase, Courier New monospace, separator "|".
+            // Fields read live from Burnin Fields; shot + TCs read live
+            // from mainComp (layer detection at current time).
             try {
-                var ctrl = mainComp.layers.byName("Burnin CTRL");
-                if (ctrl) {
-                    // Heal an older-build expression in-place: if the Source
-                    // Text expression references Burnin Fields but uses the
-                    // buggy `.value.text` accessor (which evaluates to
-                    // undefined in expression context), just overwrite it.
-                    // Avoids losing the user's Show/Render/Font Size values
-                    // to a full rebuild.
-                    var isText = false;
-                    try { isText = !!(ctrl.text && ctrl.text.sourceText); } catch (eIT) {}
-                    var exprStr = "";
-                    try { exprStr = ctrl.property("Source Text").expression || ""; } catch (eES) {}
-                    var hasFieldsExpr = isText && exprStr.indexOf("Burnin Fields") >= 0;
-                    var hasBuggyAccess = exprStr.indexOf(".value.text") >= 0;
-                    // Latest format writes "src f<N> @ <TC>" + "tl f<N>" and
-                    // "Project: " labels — older fields expressions without
-                    // that need an upgrade.
-                    var hasSrcTlFields = exprStr.indexOf("src f") >= 0 && exprStr.indexOf("tl f") >= 0;
-                    var hasLabels = exprStr.indexOf("'Project: '") >= 0;
-                    // Latest version splits into two lines via topParts/botParts.
-                    var hasTwoLine = exprStr.indexOf("topParts") >= 0 && exprStr.indexOf("botParts") >= 0;
-                    if (isText && hasFieldsExpr && (hasBuggyAccess || !hasSrcTlFields || !hasLabels || !hasTwoLine)) {
-                        try { ctrl.locked = false; } catch (eUL) {}
-                        try { ctrl.property("Source Text").expression = buildCtrlExpr(); } catch (eHeal) {}
-                    } else if (!isText || !hasFieldsExpr) {
-                        try { ctrl.locked = false; ctrl.remove(); } catch (eRm) {}
-                        ctrl = null;
+                var mainCompNameEsc = mainComp.name.replace(/'/g, "\\'");
+
+                // Remove any old burnin artifacts before rebuilding.
+                function purgeMainCompLayer(nm) {
+                    var L = mainComp.layers.byName(nm);
+                    if (L) { try { L.locked = false; L.remove(); } catch (eRmL) {} }
+                }
+                purgeMainCompLayer("Burnin CTRL");
+                purgeMainCompLayer("Burnin CTRL BG");
+                purgeMainCompLayer("Burnin");
+                for (var pi = proj.numItems; pi >= 1; pi--) {
+                    var pit = proj.item(pi);
+                    if (pit instanceof CompItem && pit.name === "Burnin") {
+                        try { pit.remove(); } catch (eRmP) {}
                     }
                 }
-                if (!ctrl) {
-                    ctrl = mainComp.layers.addText("");
-                    ctrl.name       = "Burnin CTRL";
-                    ctrl.guideLayer = true;
-                    ctrl.label      = 2; // Yellow
-                    try {
-                        var cDoc = ctrl.property("Source Text").value;
-                        cDoc.fontSize = 24;
-                        cDoc.fillColor = [1, 1, 1];
-                        cDoc.justification = ParagraphJustification.LEFT_JUSTIFY;
-                        ctrl.property("Source Text").setValue(cDoc);
-                        ctrl.property("Anchor Point").setValue([0, 0]);
-                        ctrl.position.setValue([40, 60]);
-                    } catch (eCD) {}
 
-                    try { ctrl.property("Source Text").expression = buildCtrlExpr(); } catch (eExpr) {}
-
-                    try {
-                        var ctrlNote = new MarkerValue(
-                            "Edit the four text layers in the 'Burnin Fields' comp (Project / Production Company / Agency / Client) to change what appears here. Toggle guideLayer / enabled on this layer to control render behaviour."
-                        );
-                        ctrlNote.protectedRegion = true;
-                        ctrl.property("Marker").setValueAtTime(0, ctrlNote);
-                    } catch (eCN) {}
+                // Expression builders. Each returns a string joined with "\n"
+                // (AE's expression parser choked on "\r" in prior builds).
+                // Labels on all four field corners (reviewers on Vimeo may
+                // not know the top-left / top-right convention). Shot name
+                // gets its own center-bottom zone so the frame-at-a-glance
+                // reads: project/company top, agency/client top, shot
+                // dead-centre, source TC bottom-left, timeline TC bottom-
+                // right. SRC / TL prefixes disambiguate the two TCs.
+                function exprTopFields() {
+                    return [
+                        "var fc = null;",
+                        "try { fc = comp('Burnin Fields'); } catch(e) {}",
+                        "function readF(n) {",
+                        "    try { return fc.layer(n).text.sourceText + ''; }",
+                        "    catch(e) { return ''; }",
+                        "}",
+                        "var parts = [];",
+                        "if (fc) {",
+                        "    var p = readF('Project');            if (p) parts.push(p);",
+                        "    var c = readF('Production Company'); if (c) parts.push('PRODUCTION COMPANY: ' + c);",
+                        "}",
+                        "parts.join(' | ').toUpperCase();"
+                    ].join("\n");
+                }
+                function exprTopRight() {
+                    return [
+                        "var fc = null;",
+                        "try { fc = comp('Burnin Fields'); } catch(e) {}",
+                        "function readF(n) {",
+                        "    try { return fc.layer(n).text.sourceText + ''; }",
+                        "    catch(e) { return ''; }",
+                        "}",
+                        "var parts = [];",
+                        "if (fc) {",
+                        "    var a = readF('Agency'); if (a) parts.push('AGENCY: ' + a);",
+                        "    var cl = readF('Client'); if (cl) parts.push('CLIENT: ' + cl);",
+                        "}",
+                        "parts.join(' | ').toUpperCase();"
+                    ].join("\n");
+                }
+                function exprBottomLeft() {
+                    return [
+                        "var m = null;",
+                        "try { m = comp('" + mainCompNameEsc + "'); } catch(e) {}",
+                        "var out = '';",
+                        "if (m) {",
+                        "    var layerT = 0;",
+                        "    var found = false;",
+                        "    var t = time;",
+                        "    for (var i = 1; i <= m.numLayers; i++) {",
+                        "        var L = m.layer(i);",
+                        "        if (!L.enabled) continue;",
+                        "        if (L.inPoint > t) continue;",
+                        "        if (L.outPoint <= t) continue;",
+                        "        try {",
+                        "            var nm = L.source.name;",
+                        "            var mm = nm.match(/^(.+?)_(container|comp)(_OS)?$/i);",
+                        "            if (mm) { layerT = t - L.inPoint; found = true; break; }",
+                        "        } catch(e) {}",
+                        "    }",
+                        "    if (found) {",
+                        "        var fps = 1 / thisComp.frameDuration;",
+                        "        var shotFrame = Math.round(layerT / thisComp.frameDuration) + 1001;",
+                        "        var srcTC = timeToTimecode(layerT, fps, false);",
+                        "        out = ('SRC F' + shotFrame + ' @ ' + srcTC).toUpperCase();",
+                        "    }",
+                        "}",
+                        "out;"
+                    ].join("\n");
+                }
+                function exprBottomCenter() {
+                    return [
+                        "var m = null;",
+                        "try { m = comp('" + mainCompNameEsc + "'); } catch(e) {}",
+                        "var out = '';",
+                        "if (m) {",
+                        "    var t = time;",
+                        "    for (var i = 1; i <= m.numLayers; i++) {",
+                        "        var L = m.layer(i);",
+                        "        if (!L.enabled) continue;",
+                        "        if (L.inPoint > t) continue;",
+                        "        if (L.outPoint <= t) continue;",
+                        "        try {",
+                        "            var nm = L.source.name;",
+                        "            var mm = nm.match(/^(.+?)_(container|comp)(_OS)?$/i);",
+                        "            if (mm) { out = mm[1].toUpperCase(); break; }",
+                        "        } catch(e) {}",
+                        "    }",
+                        "}",
+                        "out;"
+                    ].join("\n");
+                }
+                function exprBottomRight() {
+                    return [
+                        "var fps = 1 / thisComp.frameDuration;",
+                        "var tlFrame = Math.floor(time / thisComp.frameDuration);",
+                        "var tlTC = timeToTimecode(time, fps, false);",
+                        "('TL F' + tlFrame + ' @ ' + tlTC).toUpperCase();"
+                    ].join("\n");
                 }
 
-                // CTRL BG — black solid sized EXACTLY to fit the rendered
-                // two-line text (both width AND height). Measure by swapping
-                // in a representative dummy at fontSize 24, reading
-                // sourceRectAtTime, then restoring the expression. Opacity
-                // 30% so the edit underneath shows through. `new TextDocument`
-                // keeps leading at auto rather than inheriting a baked pixel
-                // value from the layer's current TextDocument.
-                var dLine1C = "shot_XXX_XXX / src f1099 @ 00:00:09:99 / tl f9999 @ 00:00:99:99";
-                var dPartsC = [];
-                try { if (etBurninProject.text) dPartsC.push("Project: "             + etBurninProject.text); } catch (eCFp) {}
-                try { if (etBurninCompany.text) dPartsC.push("Production Company: " + etBurninCompany.text); } catch (eCFc) {}
-                try { if (etBurninAgency.text)  dPartsC.push("Agency: "              + etBurninAgency.text);  } catch (eCFa) {}
-                try { if (etBurninClient.text)  dPartsC.push("Client: "              + etBurninClient.text);  } catch (eCFl) {}
-                var dLine2C = dPartsC.join(" / ");
-                var dmyC    = dLine2C.length > 0 ? dLine1C + "\n" + dLine2C : dLine1C;
+                // Create the Burnin precomp at mainComp dimensions.
+                var burninComp = proj.items.addComp(
+                    "Burnin",
+                    mainComp.width, mainComp.height, mainComp.pixelAspect,
+                    mainComp.duration, mainComp.frameRate
+                );
+                try { burninComp.displayStartTime = mainComp.displayStartTime; } catch (eBDS) {}
+                try { burninComp.label = 2; } catch (eBLb) {}
+                try { burninComp.parentFolder = binShots; } catch (eBPF) {}
 
-                var cbgWidth   = 800;
-                var cbgHeight  = 66;
-                var cbgCenterX = mainComp.width / 2;
-                var cbgCenterY = 68;
-                var savedCtrlExpr = "";
-                try { savedCtrlExpr = ctrl.property("Source Text").expression || ""; } catch (eSCE) {}
-                try {
-                    try { ctrl.locked = false; } catch (eULC) {}
-                    try { ctrl.property("Source Text").expression = ""; } catch (eCCE) {}
-                    var existingCFont = null;
-                    try { existingCFont = ctrl.property("Source Text").value.fontFamily; } catch (eECF) {}
-                    // Two-step reset — see addGuideBurnIn for rationale.
-                    ctrl.property("Source Text").setValue(new TextDocument(dmyC));
-                    var dDocC = ctrl.property("Source Text").value;
-                    dDocC.fontSize = 24;
-                    if (existingCFont) { try { dDocC.fontFamily = existingCFont; } catch (eCDF) {} }
-                    dDocC.fillColor = [1, 1, 1];
-                    dDocC.justification = ParagraphJustification.LEFT_JUSTIFY;
-                    ctrl.property("Source Text").setValue(dDocC);
-                    var crect = ctrl.sourceRectAtTime(ctrl.startTime, false);
-                    var cpadX = 14, cpadY = 4;
-                    cbgWidth   = Math.ceil(crect.width)  + cpadX * 2;
-                    cbgHeight  = Math.ceil(crect.height) + cpadY * 2;
-                    var cLeft   = 40 + crect.left;
-                    var cRight  = cLeft + crect.width;
-                    var cTop    = 60 + crect.top;
-                    var cBottom = cTop + crect.height;
-                    cbgCenterX = Math.round((cLeft + cRight) / 2);
-                    cbgCenterY = Math.round((cTop + cBottom) / 2);
-                } catch (eMCR) {}
-                // Restore the live expression — measurement done.
-                try { ctrl.property("Source Text").expression = savedCtrlExpr || buildCtrlExpr(); } catch (eRE) {}
+                // Per-text BG solids sized to hug each corner text (no more
+                // full-width strips). Each corner block carries a measurement
+                // dummy string so the BG reflects realistic content width;
+                // sourceRectAtTime after dummy setValue gives the exact pixel
+                // size. Font bold + 48pt @ 1080p for small-screen legibility.
+                //
+                // Leave ~80px (@1080p) at the very bottom for Vimeo's review-
+                // player controls (scrubber + TC + fullscreen overlay the
+                // lower ~60px during playback on vimeo.com).
+                //
+                // All pixel values scale off comp height so the burnin
+                // stays visually consistent from SD through 4K/8K (4K ≈ 2×
+                // scale, 8K ≈ 4× scale).
+                var burninScale     = mainComp.height / 1080;
+                var vimeoReservedPx = Math.round(80 * burninScale);
+                var fieldProj    = "";
+                var fieldCompany = "";
+                var fieldAgency  = "";
+                var fieldClient  = "";
+                try { fieldProj    = etBurninProject.text || ""; } catch (eEF1) {}
+                try { fieldCompany = etBurninCompany.text || ""; } catch (eEF2) {}
+                try { fieldAgency  = etBurninAgency.text  || ""; } catch (eEF3) {}
+                try { fieldClient  = etBurninClient.text  || ""; } catch (eEF4) {}
+                function joinBurninLabelled(pairs) {
+                    // pairs[i] = [label, value]. Empty label → no prefix.
+                    var out = [];
+                    for (var i = 0; i < pairs.length; i++) {
+                        if (pairs[i][1]) {
+                            var prefix = pairs[i][0] ? (pairs[i][0] + ": ") : "";
+                            out.push((prefix + pairs[i][1]).toUpperCase());
+                        }
+                    }
+                    return out.join(" | ");
+                }
+                var measureTL = joinBurninLabelled([["", fieldProj], ["Production Company", fieldCompany]]);
+                var measureTR = joinBurninLabelled([["Agency", fieldAgency], ["Client", fieldClient]]);
+                var measureBL = "SRC F1099 @ 00:00:99:99";
+                var measureBM = "SHOT_XXX_XXX";
+                var measureBR = "TL F9999 @ 00:00:99:99";
 
-                var ctrlBg = mainComp.layers.byName("Burnin CTRL BG");
-                if (ctrlBg) { try { ctrlBg.locked = false; ctrlBg.remove(); } catch (eRmB) {} }
-                ctrlBg = mainComp.layers.addSolid([0, 0, 0], "Burnin CTRL BG", cbgWidth, cbgHeight, 1);
-                try {
-                    ctrlBg.guideLayer = true;
-                    ctrlBg.label = 2; // Yellow
-                    ctrlBg.position.setValue([cbgCenterX, cbgCenterY]);
-                    try { ctrlBg.property("ADBE Transform Group").property("ADBE Opacity").setValue(30); } catch (eOpCBg) {}
-                    ctrlBg.locked = true;
-                } catch (eCBg) {}
+                // addCorner — add text + sized BG pair. Hybrid justification:
+                //   - CENTER_JUSTIFY for center alignment (self-centres live
+                //     text on the position regardless of width, so the SHOT
+                //     zone looks right whether the live value is "SHOT_010"
+                //     or "SHOT_010_030").
+                //   - LEFT_JUSTIFY + manual position shift for both left
+                //     and right alignment. AE's RIGHT_JUSTIFY on point
+                //     text doesn't actually align the right edge at the
+                //     layer origin — text ends up left-anchored and clips
+                //     off the frame. Shifting position.x = edgeX - r.width
+                //     puts the measured text's right edge at edgeX instead.
+                // `edgeX` is the comp-space x that the text aligns to:
+                //   align=left   → edgeX is the text's LEFT edge
+                //   align=right  → edgeX is the text's RIGHT edge
+                //   align=center → edgeX is the text's CENTRE
+                function addCorner(name, expr, measureStr, edgeX, yPos, align) {
+                    var L = burninComp.layers.addText(" ");
+                    L.name = name;
+                    L.label = 2;
+                    var tp = L.property("Source Text");
+                    tp.setValue(new TextDocument(measureStr && measureStr.length > 0 ? measureStr : " "));
+                    var td = tp.value;
+                    // Fixed 48pt across all resolutions — user's preferred
+                    // size for HD and UHD alike (UHD on Vimeo gets scaled
+                    // down in-browser, so larger source text ends up too
+                    // heavy visually).
+                    td.fontSize = 48;
+                    // Modern bold monospace. Source Code Pro ships with
+                    // Adobe Creative Cloud so it's guaranteed on every AE
+                    // install (macOS + Windows). Fall back through Courier
+                    // variants if the CC bundle ever goes missing.
+                    try { td.font = "SourceCodePro-Bold"; } catch (eSc1) {
+                        try { td.font = "SourceCodePro-Regular"; } catch (eSc2) {
+                            try { td.font = "CourierNewPS-BoldMT"; } catch (eBnt) {
+                                try { td.font = "CourierNewPSMT"; } catch (eFnt) {}
+                            }
+                        }
+                    }
+                    td.fillColor = [1, 1, 1];
+                    td.justification =
+                        (align === "center") ? ParagraphJustification.CENTER_JUSTIFY :
+                                               ParagraphJustification.LEFT_JUSTIFY;
+                    tp.setValue(td);
+                    L.property("Anchor Point").setValue([0, 0]);
+                    L.position.setValue([edgeX, yPos]);
 
-                // Text above BG in the stack.
-                try { ctrl.moveToBeginning(); } catch (eMvT) {}
-            } catch (eCtrl) {}
+                    // Measure the rendered dummy. For CENTER_JUSTIFY, rect.left
+                    // is ~-width/2; for LEFT_JUSTIFY it's ~0. Shift layer
+                    // position to land the text where we want.
+                    var padX = Math.round(14 * burninScale), padY = Math.round(6 * burninScale);
+                    var bgW = 400, bgH = 44, bgCX = edgeX, bgCY = yPos;
+                    var finalX = edgeX;
+                    try {
+                        var r = L.sourceRectAtTime(L.startTime, false);
+                        if (r.width > 0 && r.height > 0) {
+                            if (align === "right") {
+                                // Shift LEFT_JUSTIFY text left by its width
+                                // so the right edge sits at edgeX.
+                                finalX = edgeX - r.width;
+                                L.position.setValue([finalX, yPos]);
+                            }
+                            bgW  = Math.ceil(r.width)  + padX * 2;
+                            bgH  = Math.ceil(r.height) + padY * 2;
+                            // Universal BG-centre formula — works whether
+                            // rect.left is 0 (LEFT) or -width/2 (CENTER).
+                            bgCX = Math.round(finalX + r.left + r.width / 2);
+                            bgCY = Math.round(yPos   + r.top  + r.height / 2);
+                        }
+                    } catch (eMR) {}
+
+                    // Swap in the live expression.
+                    tp.expression = expr;
+                    try { tp.expressionEnabled = true; } catch (eEE) {}
+
+                    // Matching BG solid, sat just under the text.
+                    var bg = burninComp.layers.addSolid([0, 0, 0], name + " BG", bgW, bgH, 1);
+                    bg.position.setValue([bgCX, bgCY]);
+                    try { bg.property("ADBE Transform Group").property("ADBE Opacity").setValue(50); } catch (eBgO) {}
+                    try { bg.moveAfter(L); } catch (eMv) {}
+                }
+
+                var margin      = Math.round(40 * burninScale);
+                // Baselines tuned for 48pt bold @1080p; scale with comp
+                // height. Top gives ~10px clearance above ascender; bottom
+                // sits ~80px clear of Vimeo controls.
+                var baselineTop = Math.round(60 * burninScale);
+                var baselineBot = mainComp.height - vimeoReservedPx - Math.round(20 * burninScale);
+
+                addCorner("BR: TL TC",      exprBottomRight(),  measureBR, mainComp.width - margin, baselineBot, "right");
+                addCorner("BM: Shot",       exprBottomCenter(), measureBM, mainComp.width / 2,       baselineBot, "center");
+                addCorner("BL: SRC TC",     exprBottomLeft(),   measureBL, margin,                    baselineBot, "left");
+                addCorner("TR: Agency",     exprTopRight(),     measureTR, mainComp.width - margin, baselineTop, "right");
+                addCorner("TL: Project",    exprTopFields(),    measureTL, margin,                    baselineTop, "left");
+
+                // Drop the Burnin precomp onto mainComp as the topmost
+                // layer so it renders on top of everything.
+                var burninLayer = mainComp.layers.add(burninComp);
+                burninLayer.name  = "Burnin";
+                burninLayer.label = 2;
+                try { burninLayer.moveToBeginning(); } catch (eBMB) {}
+            } catch (eBurnin) {
+                reportError("BURNIN", eBurnin, "Burnin precomp creation failed.");
+            }
+         } // end chkBurninEnabled
 
             var count = 0;
             var importedShots = [];
@@ -3521,7 +3537,6 @@ NOTES
                             if (L.guideLayer) continue;
                             try { L.enabled = false; L.audioEnabled = false; } catch (eEnD) {}
                         }
-                        var bl = tComp.layers.byName("Guide Burnin"); if (bl) { bl.locked=false; bl.moveToBeginning(); bl.locked=true; }
                         importedShots.push(ri.n);
                         count++;
                         cancelStats.rendersDone++;
