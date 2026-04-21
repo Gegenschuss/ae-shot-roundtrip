@@ -867,4 +867,56 @@
     saveFile.write(L.join("\n"));
     saveFile.close();
 
+    // ─── completion dialog (grey ScriptUI, not alert) ───────────────────────
+    // Skipped when invoked from Shot Roundtrip — that flow has its own
+    // end-of-run report and doesn't want a second confirmation.
+    if ($.global.__shotRoundtripXMLDir) return;
+
+    (function showExportSummary() {
+        var dlg = new Window("dialog", "Export Shot XML — Done");
+        dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
+        dlg.spacing = 10; dlg.margins = 14;
+
+        var LABEL_W = 150;
+        var addRow = function (parent, label, value) {
+            var g = parent.add("group");
+            g.orientation = "row"; g.alignChildren = ["left", "center"]; g.spacing = 8;
+            var l = g.add("statictext", undefined, label); l.preferredSize = [LABEL_W, 18];
+            g.add("statictext", undefined, String(value));
+        };
+
+        var statsPnl = dlg.add("panel", undefined, "Summary");
+        statsPnl.orientation = "column"; statsPnl.alignChildren = ["fill", "top"];
+        statsPnl.margins = [12, 12, 12, 12]; statsPnl.spacing = 4;
+        addRow(statsPnl, "Clips exported:",    clips.length);
+        addRow(statsPnl, "Sequence duration:", framesToTC(totalSeqF, seqFps) + "  (" + totalSeqF + "f @ " + seqFps + ")");
+        addRow(statsPnl, "Mode:",              trimToCut ? "Trim to Editorial Cut (Experimental)" : "Full clips (clip + handles)");
+
+        var filePnl = dlg.add("panel", undefined, "File");
+        filePnl.orientation = "column"; filePnl.alignChildren = ["fill", "top"];
+        filePnl.margins = [12, 12, 12, 12]; filePnl.spacing = 4;
+        addRow(filePnl, "Saved to:", saveFile.displayName);
+        filePnl.add("statictext", undefined, saveFile.parent.fsName);
+
+        if (warnings.length > 0) {
+            var warnPnl = dlg.add("panel", undefined, "Warnings");
+            warnPnl.orientation = "column"; warnPnl.alignChildren = ["fill", "top"];
+            warnPnl.margins = [12, 12, 12, 12]; warnPnl.spacing = 4;
+            var body = "";
+            for (var wi = 0; wi < warnings.length; wi++) body += "  " + warnings[wi] + "\n";
+            var lines = body.split("\n").length;
+            var maxH  = $.screens[0].bottom - $.screens[0].top - 360;
+            var textH = Math.min(Math.max(lines * 15 + 10, 60), maxH);
+            var txt = warnPnl.add("edittext", undefined, body,
+                { multiline: true, readonly: true, scrollable: true });
+            txt.preferredSize = [460, textH];
+        }
+
+        var btnRow = dlg.add("group");
+        btnRow.alignment = ["right", "bottom"];
+        var ok = btnRow.add("button", undefined, "OK"); ok.preferredSize = [80, 28];
+        ok.onClick = function () { dlg.close(); };
+        dlg.show();
+    })();
+
 })();

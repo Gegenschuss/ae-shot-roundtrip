@@ -425,21 +425,33 @@ work is underway. The pipeline is designed around this:
   can strip them out. This rebuilds them from the existing shot comps so
   you can reconstruct the Premiere edit without re-running the full
   roundtrip. Prompts for a handle-frame count (default 50).
-- **Apply Burnin Mode** — Reads the **Burnin CTRL** null that Shot Roundtrip
-  drops into mainComp and pushes its state to every shot's Guide Burnin
-  layer. The CTRL has two Checkbox Control effects:
-  - **Show** — live cross-comp expression on every Guide Burnin's
-    opacity. Toggle it and all shot burnins hide or reappear
-    instantly in AE's viewer.
-  - **Render** — not expression-driven (AE's `guideLayer` flag isn't
-    animatable). Flip it and run this helper to push the new state
-    across every `_comp`: `Render = ON` clears the guide flag so the
-    burnin bakes into renders; `Render = OFF` restores guide-only
-    (the default, visible in AE but excluded from renders).
+- **Burnin CTRL** *(mainComp text layer, not a separate tool)* — Shot
+  Roundtrip drops a yellow **Burnin CTRL** text layer in mainComp with a
+  live expression that reads from a **Burnin Fields** precomp and shows
+  `Project: X / Production Company: Y / Agency: Z / Client: W / <shot> /
+  src f<N> @ <TC> / tl f<N> @ <TC>` for the shot under the playhead. The
+  `src` pair is the shot's own frame number (1001 at cut-in, Nuke
+  convention) and source-relative timecode; the `tl` pair is the
+  mainComp timeline frame and timecode at the current playhead.
 
-  Open the main comp before running. The CTRL is created automatically
-  by Shot Roundtrip; if it's missing, re-run Shot Roundtrip on that
-  project and it'll appear. Runs in one undo step.
+  **Burnin Fields** (precomp, lives in `/Shots/`) — four named text layers:
+  - **Project** (default: the `.aep` filename)
+  - **Production Company** (default: `Gegenschuss`)
+  - **Agency**
+  - **Client**
+
+  The Shot Roundtrip settings dialog has a **Burnin** panel with inputs
+  for all four fields. It pre-populates from the existing Burnin Fields
+  comp (so re-runs show the current values and won't clobber your edits)
+  and writes the values back on Run. You can also open Burnin Fields
+  directly at any time and edit each text layer's Source Text — the
+  CTRL's live preview picks up the change immediately. Blank fields are
+  skipped in the composed burnin.
+
+  To control visibility / render-inclusion, toggle `guideLayer` and
+  `enabled` on the CTRL text layer manually in AE's UI. There's no
+  helper to push state across shots — the CTRL lives in mainComp
+  because that's where the render output comes from.
 - **Reverse Stretch → Remap** *(Little Toolbox)* — For each selected
   layer with negative stretch, rewrites the reversal as an equivalent
   time remap: stretch back to `100`, time remap enabled, and two
