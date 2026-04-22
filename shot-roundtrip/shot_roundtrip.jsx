@@ -203,6 +203,10 @@ NOTES
         var chkCreateNuke     = pnlOpt.add("checkbox", undefined, "Create Nuke Scripts");  chkCreateNuke.value     = true;
         var chkExportXML      = pnlOpt.add("checkbox", undefined, "Export Shot XML");    chkExportXML.value      = true;
         var chkCreateDynLink  = pnlOpt.add("checkbox", undefined, "Create dynamicLink Comps"); chkCreateDynLink.value = true;
+        var chkTrimToWorkArea = pnlOpt.add("checkbox", undefined, "Trim footage compositions (Experimental)"); chkTrimToWorkArea.value = false;
+        chkTrimToWorkArea.helpTip = "Experimental: intended to shrink each _comp to its footage-precomp layer range (clip + handles) "
+                                  + "after the roundtrip. Currently parked — the implementation produced inconsistent results across "
+                                  + "precomp vs. container shots and is being revisited. Leave checked or unchecked; no effect right now.";
         // Note: duplicate-shared-sources is a contextual choice — it only
         // matters when the selection actually contains shared inner
         // footage. Its checkbox lives in the Confirm Shots preflight
@@ -295,6 +299,7 @@ NOTES
             createNuke:        "true",
             exportXML:         "true",
             createDynLink:     "true",
+            trimToWorkArea:    "false",
             sharedSourceMode:  "separate",
             overscan:      "10",
             omTemplate:    "ProRes 422 HQ",
@@ -325,6 +330,7 @@ NOTES
             chkCreateNuke.value    = (s.createNuke    === "true" || s.createNuke    === true);
             chkExportXML.value     = (s.exportXML     === "true" || s.exportXML     === true);
             chkCreateDynLink.value = (s.createDynLink === "true" || s.createDynLink === true);
+            chkTrimToWorkArea.value = (s.trimToWorkArea === "true" || s.trimToWorkArea === true);
             // sharedSourceMode has no main-dialog control — its dedicated
             // preflight dialog reads srLoad("sharedSourceMode", …) at
             // show-time and saves the user's pick on Continue.
@@ -353,6 +359,7 @@ NOTES
             createNuke:     srLoad("createNuke",     SR_DEFAULTS.createNuke),
             exportXML:      srLoad("exportXML",      SR_DEFAULTS.exportXML),
             createDynLink:  srLoad("createDynLink",  SR_DEFAULTS.createDynLink),
+            trimToWorkArea: srLoad("trimToWorkArea", SR_DEFAULTS.trimToWorkArea),
             overscan:       srLoad("overscan",       SR_DEFAULTS.overscan),
             omTemplate:     srLoad("omTemplate",     SR_DEFAULTS.omTemplate),
             shotsFolder:    srLoad("shotsFolder",    SR_DEFAULTS.shotsFolder),
@@ -410,6 +417,7 @@ NOTES
             srSave("createNuke",    chkCreateNuke.value);
             srSave("exportXML",     chkExportXML.value);
             srSave("createDynLink", chkCreateDynLink.value);
+            srSave("trimToWorkArea", chkTrimToWorkArea.value);
             // sharedSourceMode is saved from its dedicated preflight dialog
             // on Continue, before Confirm Shots even appears.
             srSave("overscan",      etOverscan.text);
@@ -3194,8 +3202,9 @@ NOTES
             // top. Four text layers at the frame's corners:
             //   TL: PROJECT | PRODUCTION COMPANY           (top-left)
             //   TR: AGENCY | CLIENT                        (top-right)
-            //   BL: SHOT | SRC F<N> @ <TC>                 (bottom-left)
-            //   BR: TL F<N> @ <TC>                         (bottom-right)
+            //   BL: TL F<N> @ <TC>                         (bottom-left)
+            //   BM: <SHOT>                                 (bottom-middle)
+            //   BR: SRC F<N> @ <TC>                        (bottom-right)
             // Plus two full-width semi-transparent strips at top / bottom
             // to keep the text readable over any footage.
             // All text uppercase, Courier New monospace, separator "|".
@@ -3225,7 +3234,7 @@ NOTES
                 // not know the top-left / top-right convention). Shot name
                 // gets its own center-bottom zone so the frame-at-a-glance
                 // reads: project/company top, agency/client top, shot
-                // dead-centre, source TC bottom-left, timeline TC bottom-
+                // dead-centre, timeline TC bottom-left, source TC bottom-
                 // right. SRC / TL prefixes disambiguate the two TCs.
                 function exprTopFields() {
                     return [
@@ -3261,32 +3270,10 @@ NOTES
                 }
                 function exprBottomLeft() {
                     return [
-                        "var m = null;",
-                        "try { m = comp('" + mainCompNameEsc + "'); } catch(e) {}",
-                        "var out = '';",
-                        "if (m) {",
-                        "    var layerT = 0;",
-                        "    var found = false;",
-                        "    var t = time;",
-                        "    for (var i = 1; i <= m.numLayers; i++) {",
-                        "        var L = m.layer(i);",
-                        "        if (!L.enabled) continue;",
-                        "        if (L.inPoint > t) continue;",
-                        "        if (L.outPoint <= t) continue;",
-                        "        try {",
-                        "            var nm = L.source.name;",
-                        "            var mm = nm.match(/^(.+?)_(container|comp)(_OS)?$/i);",
-                        "            if (mm) { layerT = t - L.inPoint; found = true; break; }",
-                        "        } catch(e) {}",
-                        "    }",
-                        "    if (found) {",
-                        "        var fps = 1 / thisComp.frameDuration;",
-                        "        var shotFrame = Math.round(layerT / thisComp.frameDuration) + 1001;",
-                        "        var srcTC = timeToTimecode(layerT, fps, false);",
-                        "        out = ('SRC F' + shotFrame + ' @ ' + srcTC).toUpperCase();",
-                        "    }",
-                        "}",
-                        "out;"
+                        "var fps = 1 / thisComp.frameDuration;",
+                        "var tlFrame = Math.floor(time / thisComp.frameDuration);",
+                        "var tlTC = timeToTimecode(time, fps, false);",
+                        "('TL F' + tlFrame + ' @ ' + tlTC).toUpperCase();"
                     ].join("\n");
                 }
                 function exprBottomCenter() {
@@ -3313,10 +3300,32 @@ NOTES
                 }
                 function exprBottomRight() {
                     return [
-                        "var fps = 1 / thisComp.frameDuration;",
-                        "var tlFrame = Math.floor(time / thisComp.frameDuration);",
-                        "var tlTC = timeToTimecode(time, fps, false);",
-                        "('TL F' + tlFrame + ' @ ' + tlTC).toUpperCase();"
+                        "var m = null;",
+                        "try { m = comp('" + mainCompNameEsc + "'); } catch(e) {}",
+                        "var out = '';",
+                        "if (m) {",
+                        "    var layerT = 0;",
+                        "    var found = false;",
+                        "    var t = time;",
+                        "    for (var i = 1; i <= m.numLayers; i++) {",
+                        "        var L = m.layer(i);",
+                        "        if (!L.enabled) continue;",
+                        "        if (L.inPoint > t) continue;",
+                        "        if (L.outPoint <= t) continue;",
+                        "        try {",
+                        "            var nm = L.source.name;",
+                        "            var mm = nm.match(/^(.+?)_(container|comp)(_OS)?$/i);",
+                        "            if (mm) { layerT = t - L.inPoint; found = true; break; }",
+                        "        } catch(e) {}",
+                        "    }",
+                        "    if (found) {",
+                        "        var fps = 1 / thisComp.frameDuration;",
+                        "        var shotFrame = Math.round(layerT / thisComp.frameDuration) + 1001;",
+                        "        var srcTC = timeToTimecode(layerT, fps, false);",
+                        "        out = ('SRC F' + shotFrame + ' @ ' + srcTC).toUpperCase();",
+                        "    }",
+                        "}",
+                        "out;"
                     ].join("\n");
                 }
 
@@ -3366,9 +3375,9 @@ NOTES
                 }
                 var measureTL = joinBurninLabelled([["", fieldProj], ["Production Company", fieldCompany]]);
                 var measureTR = joinBurninLabelled([["Agency", fieldAgency], ["Client", fieldClient]]);
-                var measureBL = "SRC F1099 @ 00:00:99:99";
+                var measureBL = "TL F9999 @ 00:00:99:99";
                 var measureBM = "SHOT_XXX_XXX";
-                var measureBR = "TL F9999 @ 00:00:99:99";
+                var measureBR = "SRC F1099 @ 00:00:99:99";
 
                 // addCorner — add text + sized BG pair. Hybrid justification:
                 //   - CENTER_JUSTIFY for center alignment (self-centres live
@@ -3458,9 +3467,9 @@ NOTES
                 var baselineTop = Math.round(60 * burninScale);
                 var baselineBot = mainComp.height - vimeoReservedPx - Math.round(20 * burninScale);
 
-                addCorner("BR: TL TC",      exprBottomRight(),  measureBR, mainComp.width - margin, baselineBot, "right");
+                addCorner("BR: SRC TC",     exprBottomRight(),  measureBR, mainComp.width - margin, baselineBot, "right");
                 addCorner("BM: Shot",       exprBottomCenter(), measureBM, mainComp.width / 2,       baselineBot, "center");
-                addCorner("BL: SRC TC",     exprBottomLeft(),   measureBL, margin,                    baselineBot, "left");
+                addCorner("BL: TL TC",      exprBottomLeft(),   measureBL, margin,                    baselineBot, "left");
                 addCorner("TR: Agency",     exprTopRight(),     measureTR, mainComp.width - margin, baselineTop, "right");
                 addCorner("TL: Project",    exprTopFields(),    measureTL, margin,                    baselineTop, "left");
 
@@ -3673,6 +3682,15 @@ NOTES
                 } else {
                     alert("Export Shot XML script not found:\n" + xmlScript.fsName);
                 }
+            }
+
+            // ── Experimental: trim footage compositions to work area ──────────
+            // Checkbox is wired but the implementation is parked — earlier
+            // attempts produced inconsistent results across precomp / container
+            // shots (see chkTrimToWorkArea helpTip). Leaving the control in the
+            // dialog so state persists; a future pass reinstates the workflow.
+            if (chkTrimToWorkArea.value) {
+                // intentionally no-op — see note above
             }
 
             try { proj.save(); } catch(eSave) {}
