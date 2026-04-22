@@ -203,10 +203,6 @@ NOTES
         var chkCreateNuke     = pnlOpt.add("checkbox", undefined, "Create Nuke Scripts");  chkCreateNuke.value     = true;
         var chkExportXML      = pnlOpt.add("checkbox", undefined, "Export Shot XML");    chkExportXML.value      = true;
         var chkCreateDynLink  = pnlOpt.add("checkbox", undefined, "Create dynamicLink Comps"); chkCreateDynLink.value = true;
-        var chkTrimToWorkArea = pnlOpt.add("checkbox", undefined, "Trim footage compositions (Experimental)"); chkTrimToWorkArea.value = false;
-        chkTrimToWorkArea.helpTip = "Experimental: intended to shrink each _comp to its footage-precomp layer range (clip + handles) "
-                                  + "after the roundtrip. Currently parked — the implementation produced inconsistent results across "
-                                  + "precomp vs. container shots and is being revisited. Leave checked or unchecked; no effect right now.";
         // Note: duplicate-shared-sources is a contextual choice — it only
         // matters when the selection actually contains shared inner
         // footage. Its checkbox lives in the Confirm Shots preflight
@@ -299,7 +295,6 @@ NOTES
             createNuke:        "true",
             exportXML:         "true",
             createDynLink:     "true",
-            trimToWorkArea:    "false",
             sharedSourceMode:  "separate",
             overscan:      "10",
             omTemplate:    "ProRes 422 HQ",
@@ -330,7 +325,6 @@ NOTES
             chkCreateNuke.value    = (s.createNuke    === "true" || s.createNuke    === true);
             chkExportXML.value     = (s.exportXML     === "true" || s.exportXML     === true);
             chkCreateDynLink.value = (s.createDynLink === "true" || s.createDynLink === true);
-            chkTrimToWorkArea.value = (s.trimToWorkArea === "true" || s.trimToWorkArea === true);
             // sharedSourceMode has no main-dialog control — its dedicated
             // preflight dialog reads srLoad("sharedSourceMode", …) at
             // show-time and saves the user's pick on Continue.
@@ -359,7 +353,6 @@ NOTES
             createNuke:     srLoad("createNuke",     SR_DEFAULTS.createNuke),
             exportXML:      srLoad("exportXML",      SR_DEFAULTS.exportXML),
             createDynLink:  srLoad("createDynLink",  SR_DEFAULTS.createDynLink),
-            trimToWorkArea: srLoad("trimToWorkArea", SR_DEFAULTS.trimToWorkArea),
             overscan:       srLoad("overscan",       SR_DEFAULTS.overscan),
             omTemplate:     srLoad("omTemplate",     SR_DEFAULTS.omTemplate),
             shotsFolder:    srLoad("shotsFolder",    SR_DEFAULTS.shotsFolder),
@@ -417,7 +410,6 @@ NOTES
             srSave("createNuke",    chkCreateNuke.value);
             srSave("exportXML",     chkExportXML.value);
             srSave("createDynLink", chkCreateDynLink.value);
-            srSave("trimToWorkArea", chkTrimToWorkArea.value);
             // sharedSourceMode is saved from its dedicated preflight dialog
             // on Continue, before Confirm Shots even appears.
             srSave("overscan",      etOverscan.text);
@@ -3682,15 +3674,6 @@ NOTES
                 } else {
                     alert("Export Shot XML script not found:\n" + xmlScript.fsName);
                 }
-            }
-
-            // ── Experimental: trim footage compositions to work area ──────────
-            // Checkbox is wired but the implementation is parked — earlier
-            // attempts produced inconsistent results across precomp / container
-            // shots (see chkTrimToWorkArea helpTip). Leaving the control in the
-            // dialog so state persists; a future pass reinstates the workflow.
-            if (chkTrimToWorkArea.value) {
-                // intentionally no-op — see note above
             }
 
             try { proj.save(); } catch(eSave) {}
