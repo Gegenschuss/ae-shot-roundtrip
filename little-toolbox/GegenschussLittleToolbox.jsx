@@ -57,6 +57,11 @@
             label:  "Reverse Stretch \u2192 Remap",
             tip:    "For each selected layer with negative stretch, rewrite the reversal as an equivalent time remap (stretch=100 + two keyframes reproducing the reversed playback). Same logic Shot Roundtrip runs automatically \u2014 exposed here for standalone use.",
             file:   "../helpers/reverse_stretch_to_remap.jsx"
+        },
+        {
+            label:  "List Color Effects",
+            tip:    "Scan the selected comp(s) recursively for every color-modification effect (Apply LUT, Curves, Levels, Color Balance, Hue/Sat, Lumetri, …) and show them in a list. Toggle enabled state on the selection or enable/disable everything in one click.",
+            file:   "../helpers/list_color_effects.jsx"
         }
     ];
 
