@@ -105,9 +105,13 @@
             var inv = layer.property("ADBE Effect Parade").addProperty(XFORM_MATCH);
             try { inv.name = INV_NAME; } catch (eRn2) {}
 
-            // Expression helpers.
+            // Expression helpers. Use explicit .property("name") lookup so
+            // AE's expression parser treats the property name as an opaque
+            // string — the shorthand effect("X")("Y") form can misroute on
+            // grouped properties like "Scale" (which is a Group containing
+            // Scale Width and Scale Height in ADBE Geometry2).
             var ref = "effect(\"" + SRC_NAME + "\")";
-            var P   = function (name) { return ref + "(\"" + name + "\")"; };
+            var P   = function (name) { return ref + ".property(\"" + name + "\")"; };
 
             // Swap anchor <-> position (so the inverse pivots around the
             // source's post-transform location and re-centres on the source's
@@ -120,10 +124,13 @@
             setExpr(inv, "Skew",          "-" + P("Skew"));
             setExpr(inv, "Skew Axis",     P("Skew Axis"));
 
-            // Scale reciprocal (AE uses 100 = 100%, so reciprocal is 10000/v).
+            // Scale reciprocal — set Scale Width and Scale Height
+            // individually. Do NOT set on "Scale" (that's a Property Group
+            // in ADBE Geometry2 and setting expression on the group cascades
+            // to both children with a broken reference to the source's
+            // "Scale" group). Uniform Scale links through so the mode
+            // follows the source.
             setExpr(inv, "Uniform Scale", P("Uniform Scale"));
-            setExpr(inv, "Scale",
-                "var s = " + P("Scale") + "; [10000/s[0], 10000/s[1]]");
             setExpr(inv, "Scale Width",   "10000 / " + P("Scale Width"));
             setExpr(inv, "Scale Height",  "10000 / " + P("Scale Height"));
 
