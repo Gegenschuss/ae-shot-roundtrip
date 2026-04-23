@@ -59,6 +59,26 @@
 
     // ── helpers ────────────────────────────────────────────────────────
 
+    function greyAlert(title, msg) {
+        var dlg = new Window("dialog", title);
+        dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
+        dlg.spacing = 10; dlg.margins = 14;
+        var p = dlg.add("panel", undefined, "");
+        p.orientation = "column"; p.alignChildren = ["fill", "top"];
+        p.margins = [12, 12, 12, 12]; p.spacing = 4;
+        var lines = String(msg).split("\n");
+        for (var i = 0; i < lines.length; i++) {
+            p.add("statictext", undefined, lines[i]);
+        }
+        var bg = dlg.add("group");
+        bg.orientation = "row"; bg.alignment = ["fill", "bottom"];
+        bg.add("statictext", undefined, "").alignment = ["fill", "center"];
+        var ok = bg.add("button", undefined, "OK", { name: "ok" });
+        ok.preferredSize = [90, 28];
+        ok.onClick = function () { dlg.close(1); };
+        dlg.show();
+    }
+
     function isFootageLayer(layer) {
         if (!(layer instanceof AVLayer)) return false;
         if (!layer.source) return false;
@@ -219,7 +239,7 @@
     var proj = app.project;
     var comp = proj.activeItem;
     if (!(comp instanceof CompItem)) {
-        alert("Import Comp Grades: open a composition first.");
+        greyAlert("Import Comp Grades", "Open a composition first.");
         return;
     }
 
@@ -275,7 +295,7 @@
         btnOK.onClick = function () {
             var f = new Folder(pathField.text);
             if (!f.exists) {
-                alert("That folder doesn't exist:\n" + pathField.text);
+                greyAlert("Import Comp Grades", "That folder doesn't exist:\n" + pathField.text);
                 return;
             }
             dlg.close(1);
@@ -289,7 +309,7 @@
 
     var all = gradeDir.getFiles(fileFilter) || [];
     if (all.length === 0) {
-        alert("Import Comp Grades: no supported files in\n" + gradeDir.fsName);
+        greyAlert("Import Comp Grades", "No supported files in\n" + gradeDir.fsName);
         return;
     }
 
@@ -324,7 +344,7 @@
     }
 
     if (plan.length === 0) {
-        alert("Import Comp Grades: nothing to import.\n\n" + warnings.join("\n"));
+        greyAlert("Import Comp Grades", "Nothing to import.\n\n" + warnings.join("\n"));
         return;
     }
 

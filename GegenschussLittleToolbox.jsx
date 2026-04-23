@@ -84,13 +84,6 @@
             tip:    "For each selected layer with negative stretch, rewrite the reversal as an equivalent time remap (stretch=100 + two keyframes reproducing the reversed playback). Same logic Shot Roundtrip runs automatically — exposed here for standalone use.",
             file:   "helpers/reverse_stretch_to_remap.jsx"
         },
-        {
-            group:  "Layer",
-            icon:   "◐",
-            label:  "Toggle Language",
-            tip:    "Project-wide language switch. Walks every comp in the project, detects layers tagged via layer.comment \"lang:XX\" or layer name suffix \"_lang_XX\" (XX = 2-8 letter code), and enables the picked language while disabling siblings in other languages. Untagged layers are left alone. Mirrors the audio switch so dubbed audio swaps alongside visuals. Last-used language is remembered across sessions.",
-            file:   "helpers/toggle_language.jsx"
-        },
 
         // ── Effects ───────────────────────────────────────────────────────
         {
@@ -142,6 +135,28 @@
             label:  "Create dynamicLink Comps",
             tip:    "Standalone dynamicLink builder. Prompts for handle frames, then for each selected precomp or footage layer creates a wrapper comp with full cut + 2× handles duration (black padded) in /Shots/dynamicLink.",
             file:   "create-dynamiclink-comps/create_dynamiclink_comps.jsx"
+        },
+        // ── Language ──────────────────────────────────────────────────────
+        {
+            group:  "Language",
+            icon:   "◎",
+            label:  "Language Preflight",
+            tip:    "Audit all language-tagged layers across the project before a batch render. Shows comp / layer / code / source (comment or name) / on-off state in a multi-column list, filterable by language. Reveal selected layer jumps to it in its comp. Copy as text dumps the audit to the clipboard. Read-only — never mutates the project.",
+            file:   "helpers/language_preflight.jsx"
+        },
+        {
+            group:  "Language",
+            icon:   "◐",
+            label:  "Toggle Language",
+            tip:    "Project-wide language switch. Walks every comp in the project, detects layers tagged via layer.comment \"lang:XX\" or layer name suffix \"_lang_XX\" (case-insensitive — \"_LANG_DE\", \"Lang: en\" all work; XX = 2-8 letter/digit/underscore code), and enables the picked language while disabling siblings in other languages. Untagged layers are left alone. Mirrors the audio switch so dubbed audio swaps alongside visuals. Last-used language is remembered across sessions.",
+            file:   "helpers/toggle_language.jsx"
+        },
+        {
+            group:  "Language",
+            icon:   "⟳",
+            label:  "Render Languages",
+            tip:    "Batch-render one or more render queue items across every tagged language. Two targets: (1) AE Render Queue — blocking, in-place, duplicates the template per (template × language) pair with _<lang> suffix; (2) Adobe Media Encoder — saves a {project}_<lang>.aep per language and queueInAMEs each, so AME reads an immutable per-language file. Pick multiple templates; total renders = templates × languages. Restores the project's original state after the batch.",
+            file:   "helpers/render_languages.jsx"
         }
     ];
 
@@ -172,6 +187,7 @@
         "Layer":      [0.55, 0.90, 0.55, 1.0], // green
         "Effects":    [1.00, 0.65, 0.35, 1.0], // orange
         "View":       [0.85, 0.55, 1.00, 1.0], // violet
+        "Language":   [0.95, 0.55, 0.80, 1.0], // pink
         "Project":    [0.95, 0.85, 0.45, 1.0]  // gold
     };
     function paintButton(btn, groupName) {

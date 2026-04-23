@@ -17,16 +17,23 @@
  *
  *   A) Layer.comment starts with "lang:<code>"
  *      e.g. comment  = "lang:de"
+ *      e.g. comment  = "LANG: EN"
  *      e.g. comment  = "lang:en  (stronger serif variant)"
- *      Preferred — keeps the Timeline layer name clean.
+ *      Preferred — keeps the Timeline layer name clean. (Layer comments
+ *      are a separate per-layer string, NOT markers — visible in the
+ *      Timeline's "Comments" column, editable via right-click → Comment.)
  *
  *   B) Layer name ends with "_lang_<code>"
  *      e.g. name     = "Title_lang_de"
+ *      e.g. name     = "Title_LANG_DE"
  *      e.g. name     = "VO_english_lang_en"
  *      Fallback — easier to scan visually if you have many layers.
  *
- * <code> is any 2–8 letter code (ISO 639-1 "de"/"en", custom "de_at",
- * whatever you like — the script just groups by the literal string).
+ * Both forms are CASE-INSENSITIVE — "_lang_", "_LANG_", "_Lang_" all
+ * work; "de", "DE", "De" all normalize to "de" internally. <code> is
+ * any 2–8 letter/digit/underscore string (ISO 639-1 "de"/"en", custom
+ * "de_at", whatever you like — the script groups by the normalized
+ * lowercase form).
  *
  * How it works:
  *   1. Walks every CompItem in the project (not just the active comp —
@@ -46,6 +53,28 @@
 (function () {
 
     var proj = app.project;
+
+    // Grey ScriptUI confirmation — consistent with the rest of the toolkit.
+    // Call instead of alert() for any end-of-run message or precondition error.
+    function greyAlert(title, msg) {
+        var dlg = new Window("dialog", title);
+        dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
+        dlg.spacing = 10; dlg.margins = 14;
+        var p = dlg.add("panel", undefined, "");
+        p.orientation = "column"; p.alignChildren = ["fill", "top"];
+        p.margins = [12, 12, 12, 12]; p.spacing = 4;
+        var lines = String(msg).split("\n");
+        for (var i = 0; i < lines.length; i++) {
+            p.add("statictext", undefined, lines[i]);
+        }
+        var bg = dlg.add("group");
+        bg.orientation = "row"; bg.alignment = ["fill", "bottom"];
+        bg.add("statictext", undefined, "").alignment = ["fill", "center"];
+        var ok = bg.add("button", undefined, "OK", { name: "ok" });
+        ok.preferredSize = [90, 28];
+        ok.onClick = function () { dlg.close(1); };
+        dlg.show();
+    }
 
     var NAME_RE    = /_lang_([a-z0-9_]{2,8})$/i;
     var COMMENT_RE = /^\s*lang\s*:\s*([a-z0-9_]{2,8})/i;
@@ -93,10 +122,11 @@
     codes.sort();
 
     if (codes.length === 0) {
-        alert("Toggle Language: no language-tagged layers found.\n\n"
+        greyAlert("Toggle Language",
+              "No language-tagged layers found.\n\n"
             + "Tag layers with either:\n"
-            + "  • layer.comment starting with \"lang:XX\", or\n"
-            + "  • layer name ending in \"_lang_XX\"\n\n"
+            + "    layer.comment starting with \"lang:XX\", or\n"
+            + "    layer name ending in \"_lang_XX\"\n\n"
             + "XX is any 2–8 letter code (e.g. de, en, fr, de_at).");
         return;
     }
@@ -188,8 +218,8 @@
 
     try { app.settings.saveSetting(SECTION, KEY, activeCode); } catch (eS) {}
 
-    alert("Toggle Language → " + activeCode + "\n\n"
-        + "Enabled: "  + enabledCnt  + "\n"
+    greyAlert("Toggle Language → " + activeCode,
+          "Enabled: "  + enabledCnt  + "\n"
         + "Disabled: " + disabledCnt);
 
 })();
