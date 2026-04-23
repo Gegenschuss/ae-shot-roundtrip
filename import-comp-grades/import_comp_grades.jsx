@@ -259,6 +259,16 @@
         dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
         dlg.spacing = 10; dlg.margins = 14;
 
+        var about = dlg.add("statictext", undefined,
+              "Import half of the Comp Grade Roundtrip. For each footage "
+            + "layer in the active comp, finds a matching graded file by "
+            + "source-file-stem prefix (newest by modification time wins) "
+            + "and drops it in as a new layer directly above the original. "
+            + "Alignment uses embedded source timecode (QuickTime moov/tmcd); "
+            + "falls back to inPoint alignment for non-QT files.",
+            { multiline: true });
+        about.preferredSize = [540, 80];
+
         var pnl = dlg.add("panel", undefined, "Source folder");
         pnl.orientation = "column"; pnl.alignChildren = ["fill", "top"];
         pnl.margins = [10, 15, 10, 10]; pnl.spacing = 6;

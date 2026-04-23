@@ -87,6 +87,15 @@ and runs in detect-only mode.
     dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
     dlg.spacing = 10; dlg.margins = 14;
 
+    var about = dlg.add("statictext", undefined,
+          "Re-renders every shot's original plate layer to "
+        + "{shot}_{suffix}.mov (ProRes) at the shot's full cut+handles "
+        + "range. Intended handoff to external denoise / stabilize tools. "
+        + "After rendering, the returns are auto-imported back into each "
+        + "{shot}_footage precomp as plate variants on top of the original.",
+        { multiline: true });
+    about.preferredSize = [520, 64];
+
     var pnl = dlg.add("panel", undefined, "Settings");
     pnl.orientation = "column"; pnl.alignChildren = ["fill", "top"];
     pnl.spacing = 6; pnl.margins = [10, 15, 10, 10];
@@ -392,9 +401,72 @@ and runs in detect-only mode.
         var outW   = Math.max(Math.min(outMax   * 7 + 24, 400), 180);
         var checkW = 60, flagW = 50, framesW = 70;
 
+        // Pre-compute derived display fields + checked state ON the plan[]
+        // entries themselves, so sorting plan[] reorders the checkbox state
+        // correctly (no parallel index array to keep in sync with the list).
+        for (var pi0 = 0; pi0 < plan.length; pi0++) {
+            plan[pi0].selected = anyFlagged ? !!plan[pi0].flagged : true;
+            plan[pi0].displayShot  = plan[pi0].shotName + (plan[pi0].isOS ? " [OS]" : "");
+            plan[pi0].displayPlate = (plan[pi0].plateLayer.source && plan[pi0].plateLayer.source.name)
+                                      ? plan[pi0].plateLayer.source.name : "?";
+            var fr0 = plan[pi0].stackComp.frameRate;
+            var pDur0 = 0; try { pDur0 = plan[pi0].stackComp.duration; } catch (eWA0) {}
+            plan[pi0].displayFrames = (fr0 > 0 && pDur0 > 0) ? Math.round(pDur0 * fr0) : 0;
+            plan[pi0].displayOutput = plan[pi0].outFile.name;
+        }
+
         var shotsPnl = win.add("panel", undefined, "Shots");
         shotsPnl.orientation = "column"; shotsPnl.alignChildren = ["fill", "top"];
         shotsPnl.margins = [10, 12, 10, 10]; shotsPnl.spacing = 4;
+
+        // Sort controls. Columns: 0 Render(check), 1 Flag, 2 Shot, 3 Plate,
+        // 4 Frames, 5 Output. Default: unsorted (plan's scan order).
+        var planSortKey = -1, planSortDir = 1;
+        function planSortList() {
+            if (planSortKey < 0) return;
+            plan.sort(function (a, b) {
+                var av, bv, isNum = false;
+                if (planSortKey === 0)      { av = a.selected ? 1 : 0; bv = b.selected ? 1 : 0; isNum = true; }
+                else if (planSortKey === 1) { av = a.flagged ? 1 : 0;  bv = b.flagged ? 1 : 0;  isNum = true; }
+                else if (planSortKey === 2) { av = a.displayShot;      bv = b.displayShot; }
+                else if (planSortKey === 3) { av = a.displayPlate;     bv = b.displayPlate; }
+                else if (planSortKey === 4) { av = a.displayFrames;    bv = b.displayFrames; isNum = true; }
+                else                        { av = a.displayOutput;    bv = b.displayOutput; }
+                if (isNum) {
+                    if (av !== bv) return (av < bv ? -1 : 1) * planSortDir;
+                    return 0;
+                }
+                av = String(av || "").toLowerCase(); bv = String(bv || "").toLowerCase();
+                if (av !== bv) return (av < bv ? -1 : 1) * planSortDir;
+                return 0;
+            });
+        }
+        var planSortRow = shotsPnl.add("group");
+        planSortRow.orientation = "row"; planSortRow.alignChildren = ["left", "center"];
+        planSortRow.spacing = 4;
+        planSortRow.add("statictext", undefined, "Sort:");
+        var PLAN_LABELS = ["Render", "Flag", "Shot", "Plate", "Frames", "Output"];
+        var planBtns = [];
+        for (var ps = 0; ps < PLAN_LABELS.length; ps++) {
+            var pb = planSortRow.add("button", undefined, PLAN_LABELS[ps]);
+            pb.preferredSize = [82, 22];
+            pb.onClick = (function (col) {
+                return function () {
+                    if (planSortKey === col) planSortDir = -planSortDir;
+                    else { planSortKey = col; planSortDir = 1; }
+                    planSortList();
+                    planRepopulate();
+                    planRefreshBtns();
+                };
+            })(ps);
+            planBtns.push(pb);
+        }
+        function planRefreshBtns() {
+            for (var i = 0; i < planBtns.length; i++) {
+                var arrow = (i === planSortKey) ? (planSortDir === 1 ? "  ↓" : "  ↑") : "";
+                planBtns[i].text = PLAN_LABELS[i] + arrow;
+            }
+        }
 
         var lb = shotsPnl.add("listbox", undefined, [], {
             multiselect: true,
@@ -406,23 +478,20 @@ and runs in detect-only mode.
         var lbH = Math.min(Math.max(plan.length * 22 + 40, 180), 520);
         lb.preferredSize = [checkW + flagW + shotW + plateW + framesW + outW + 40, lbH];
 
-        var selectedState = [];
-        for (var pi = 0; pi < plan.length; pi++) {
-            // If any shot is flagged, pre-check only flagged ones. Otherwise
-            // pre-check all (classic opt-out). User can toggle either way.
-            var preChecked = anyFlagged ? !!plan[pi].flagged : true;
-            selectedState.push(preChecked);
-            var item = lb.add("item", preChecked ? "\u2713" : "");
-            item.subItems[0].text = plan[pi].flagged ? "\u25cf" : "";
-            item.subItems[1].text = plan[pi].shotName + (plan[pi].isOS ? " [OS]" : "");
-            item.subItems[2].text = (plan[pi].plateLayer.source && plan[pi].plateLayer.source.name) ? plan[pi].plateLayer.source.name : "?";
-            // Render span = stack precomp's full duration (clip + handles).
-            var fr = plan[pi].stackComp.frameRate;
-            var pDur = 0; try { pDur = plan[pi].stackComp.duration; } catch (eWA) {}
-            var frames = (fr > 0 && pDur > 0) ? Math.round(pDur * fr) : 0;
-            item.subItems[3].text = String(frames);
-            item.subItems[4].text = plan[pi].outFile.name;
+        function planRepopulate() {
+            try { lb.removeAll(); } catch (eRA) {}
+            for (var pi2 = 0; pi2 < plan.length; pi2++) {
+                var itm = lb.add("item", plan[pi2].selected ? "✓" : "");
+                itm.subItems[0].text = plan[pi2].flagged ? "●" : "";
+                itm.subItems[1].text = plan[pi2].displayShot;
+                itm.subItems[2].text = plan[pi2].displayPlate;
+                itm.subItems[3].text = String(plan[pi2].displayFrames);
+                itm.subItems[4].text = plan[pi2].displayOutput;
+            }
         }
+        planRepopulate();
+        planRefreshBtns();
+
 
         function setSelected(value) {
             var sel = lb.selection;
@@ -432,7 +501,7 @@ and runs in detect-only mode.
             for (var si = 0; si < arr.length; si++) idxs.push(arr[si].index);
             for (var j = 0; j < idxs.length; j++) {
                 var idx = idxs[j];
-                selectedState[idx] = value;
+                plan[idx].selected = value;
                 lb.items[idx].text = value ? "\u2713" : "";
             }
             // ScriptUI doesn't repaint selected rows until the selection
@@ -462,8 +531,8 @@ and runs in detect-only mode.
                 var arr = (sel.length !== undefined) ? sel : [sel];
                 for (var si = 0; si < arr.length; si++) {
                     var idx = arr[si].index;
-                    selectedState[idx] = !selectedState[idx];
-                    lb.items[idx].text = selectedState[idx] ? "\u2713" : "";
+                    plan[idx].selected = !plan[idx].selected;
+                    lb.items[idx].text = plan[idx].selected ? "\u2713" : "";
                 }
             }
         });
@@ -472,7 +541,7 @@ and runs in detect-only mode.
 
         var filtered = [];
         for (var fi = 0; fi < plan.length; fi++) {
-            if (selectedState[fi]) filtered.push(plan[fi]);
+            if (plan[fi].selected) filtered.push(plan[fi]);
         }
         return filtered;
     }

@@ -476,6 +476,16 @@
         dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
         dlg.spacing = 10; dlg.margins = 14;
 
+        var about = dlg.add("statictext", undefined,
+              "Writes an FCP7 / xmeml v4 XML timeline for DaVinci Resolve. "
+            + "Either scans the Shots folder and lays every *_comp's footage "
+            + "head-to-tail on one track (Shot Roundtrip pipeline), or dumps "
+            + "every footage layer in the active comp at its own timeline "
+            + "position as separate tracks (Comp Grade Roundtrip — pairs "
+            + "with Import Comp Grades).",
+            { multiline: true });
+        about.preferredSize = [540, 72];
+
         var srcPnl = dlg.add("panel", undefined, "Source");
         srcPnl.orientation = "column"; srcPnl.alignChildren = ["left", "top"];
         srcPnl.margins = [10, 15, 10, 10]; srcPnl.spacing = 4;

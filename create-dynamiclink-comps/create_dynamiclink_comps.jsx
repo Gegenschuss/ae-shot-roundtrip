@@ -180,6 +180,15 @@
         dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
         dlg.margins = 14; dlg.spacing = 10;
 
+        var about = dlg.add("statictext", undefined,
+              "For each selected precomp or footage layer, builds a wrapper "
+            + "comp named \"<source>_dynamicLink\" in /Shots/dynamicLink. "
+            + "Wrapper duration is cut + 2× handles (missing frames are "
+            + "black-padded). Used by Premiere to Dynamic Link each shot "
+            + "back into the cut with safe handles for re-trim.",
+            { multiline: true });
+        about.preferredSize = [440, 72];
+
         dlg.add("statictext", undefined, "Handle length for the new dynamicLink comps.");
 
         var row = dlg.add("group");

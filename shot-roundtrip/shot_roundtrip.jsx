@@ -643,16 +643,63 @@ NOTES
                 " " + (reversed.length === 1 ? "is" : "are") +
                 " in your selection (top-level or nested):");
 
+            // Sort controls — ScriptUI listbox headers aren't clickable,
+            // so we expose sort as a small button row above the list.
+            var revSortKey = 0, revSortDir = 1;
+            function revSortList() {
+                reversed.sort(function (a, b) {
+                    var av, bv;
+                    if (revSortKey === 0)      { av = a.layerName; bv = b.layerName; }
+                    else if (revSortKey === 1) { av = a.path;      bv = b.path;      }
+                    else                       { av = a.label;     bv = b.label;     }
+                    av = String(av || "").toLowerCase(); bv = String(bv || "").toLowerCase();
+                    if (av !== bv) return (av < bv ? -1 : 1) * revSortDir;
+                    return 0;
+                });
+            }
+            var revSortRow = w.add("group");
+            revSortRow.orientation = "row"; revSortRow.alignChildren = ["left", "center"];
+            revSortRow.spacing = 4;
+            revSortRow.add("statictext", undefined, "Sort:");
+            var REV_LABELS = ["Layer", "Path", "Effect"];
+            var revBtns = [];
+            for (var rs = 0; rs < REV_LABELS.length; rs++) {
+                var rb = revSortRow.add("button", undefined, REV_LABELS[rs]);
+                rb.preferredSize = [90, 22];
+                rb.onClick = (function (col) {
+                    return function () {
+                        if (revSortKey === col) revSortDir = -revSortDir;
+                        else { revSortKey = col; revSortDir = 1; }
+                        revSortList();
+                        revRepopulate();
+                        revRefreshBtns();
+                    };
+                })(rs);
+                revBtns.push(rb);
+            }
+            function revRefreshBtns() {
+                for (var i = 0; i < revBtns.length; i++) {
+                    var arrow = (i === revSortKey) ? (revSortDir === 1 ? "  ↓" : "  ↑") : "";
+                    revBtns[i].text = REV_LABELS[i] + arrow;
+                }
+            }
+
             var lb = w.add("listbox", undefined, [], {
                 numberOfColumns: 3, showHeaders: true,
                 columnTitles: ["Layer", "Path", "Effect"],
                 columnWidths: [240, 520, 220]
             });
-            for (var k = 0; k < reversed.length; k++) {
-                var row = lb.add("item", reversed[k].layerName);
-                row.subItems[0].text = reversed[k].path;
-                row.subItems[1].text = reversed[k].label;
+            function revRepopulate() {
+                try { lb.removeAll(); } catch (eRA) {}
+                for (var k = 0; k < reversed.length; k++) {
+                    var row = lb.add("item", reversed[k].layerName);
+                    row.subItems[0].text = reversed[k].path;
+                    row.subItems[1].text = reversed[k].label;
+                }
             }
+            revSortList();
+            revRepopulate();
+            revRefreshBtns();
             lb.preferredSize = [1000, Math.min(reversed.length * 22 + 40, 420)];
 
             var warn = w.add("statictext", undefined,
@@ -2138,6 +2185,55 @@ NOTES
         shotsPnl.orientation = "column"; shotsPnl.alignChildren = ["fill", "top"];
         shotsPnl.margins = [10, 12, 10, 10]; shotsPnl.spacing = 4;
 
+        // Sort controls. Each confRows[i] owns its layerIdx independent of
+        // row position, so sorting doesn't break the overscan-toggle handler
+        // (which looks up confRows[selectedListboxIndex].layerIdx).
+        var confSortKey = -1;  // -1 = no sort applied (original shot-order)
+        var confSortDir = 1;
+        function confSortRows() {
+            if (confSortKey < 0) return;
+            confRows.sort(function (a, b) {
+                var av = a.cols[confSortKey], bv = b.cols[confSortKey];
+                // Frames and Res columns parse to numbers when possible so
+                // "1000" sorts after "500" instead of alphabetically.
+                if (confSortKey === 1 || confSortKey === 2) {
+                    var an = parseFloat(av), bn = parseFloat(bv);
+                    if (!isNaN(an) && !isNaN(bn)) {
+                        if (an !== bn) return (an < bn ? -1 : 1) * confSortDir;
+                    }
+                }
+                av = String(av || "").toLowerCase(); bv = String(bv || "").toLowerCase();
+                if (av !== bv) return (av < bv ? -1 : 1) * confSortDir;
+                return 0;
+            });
+        }
+        var confSortRow = shotsPnl.add("group");
+        confSortRow.orientation = "row"; confSortRow.alignChildren = ["left", "center"];
+        confSortRow.spacing = 4;
+        confSortRow.add("statictext", undefined, "Sort:");
+        var CONF_LABELS = ["Shot", "Frames", "Res", "Notice", "Source", "Overscan"];
+        var confBtns = [];
+        for (var cs = 0; cs < CONF_LABELS.length; cs++) {
+            var cb = confSortRow.add("button", undefined, CONF_LABELS[cs]);
+            cb.preferredSize = [86, 22];
+            cb.onClick = (function (col) {
+                return function () {
+                    if (confSortKey === col) confSortDir = -confSortDir;
+                    else { confSortKey = col; confSortDir = 1; }
+                    confSortRows();
+                    confRepopulate();
+                    confRefreshBtns();
+                };
+            })(cs);
+            confBtns.push(cb);
+        }
+        function confRefreshBtns() {
+            for (var i = 0; i < confBtns.length; i++) {
+                var arrow = (i === confSortKey) ? (confSortDir === 1 ? "  ↓" : "  ↑") : "";
+                confBtns[i].text = CONF_LABELS[i] + arrow;
+            }
+        }
+
         var confLB = shotsPnl.add("listbox", undefined, [], {
             multiselect: true,
             numberOfColumns: 6,
@@ -2148,14 +2244,19 @@ NOTES
         var confLBH = Math.max(confRows.length * 22 + 40, 200);
         confLBH = Math.min(confLBH, 600);
         confLB.preferredSize = [confDlgW, confLBH];
-        for (var cfi = 0; cfi < confRows.length; cfi++) {
-            var cfRow = confLB.add("item", confRows[cfi].cols[0]);
-            cfRow.subItems[0].text = confRows[cfi].cols[1]; // frames
-            cfRow.subItems[1].text = confRows[cfi].cols[2]; // res
-            cfRow.subItems[2].text = confRows[cfi].cols[3]; // notice
-            cfRow.subItems[3].text = confRows[cfi].cols[4]; // source
-            cfRow.subItems[4].text = confRows[cfi].cols[5]; // os
+        function confRepopulate() {
+            try { confLB.removeAll(); } catch (eRA) {}
+            for (var cfi = 0; cfi < confRows.length; cfi++) {
+                var cfRow = confLB.add("item", confRows[cfi].cols[0]);
+                cfRow.subItems[0].text = confRows[cfi].cols[1]; // frames
+                cfRow.subItems[1].text = confRows[cfi].cols[2]; // res
+                cfRow.subItems[2].text = confRows[cfi].cols[3]; // notice
+                cfRow.subItems[3].text = confRows[cfi].cols[4]; // source
+                cfRow.subItems[4].text = confRows[cfi].cols[5]; // os
+            }
         }
+        confRepopulate();
+        confRefreshBtns();
 
         // Shared-source warning panel. Only shown when cross-selection
         // sharing is detected (>= 2 entries with the same originalSourceId

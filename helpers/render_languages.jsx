@@ -212,17 +212,20 @@
     var originalLang = detectCurrentLanguage();
 
     // ── filename helper ──────────────────────────────────────────────
-    // Insert "_<lang>" before the last dot. Sequence patterns like
-    // "Frames_[####].png" become "Frames_[####]_de.png"; plain files
-    // like "MyComp.mov" become "MyComp_de.mov"; extension-less files
-    // get the suffix appended.
+    // Insert "_<LANG>" (UPPERCASE) before the last dot. Sequence patterns
+    // like "Frames_[####].png" become "Frames_[####]_DE.png"; plain files
+    // like "MyComp.mov" become "MyComp_DE.mov"; extension-less files get
+    // the suffix appended. Internal lang codes stay lowercase for matching
+    // across tag conventions; only the file-/.aep-name output is UPPERCASE
+    // so deliverables read cleanly (industry convention).
     function withLangSuffix(fsName, lang) {
+        var langUp = String(lang || "").toUpperCase();
         var slash = Math.max(fsName.lastIndexOf("/"), fsName.lastIndexOf("\\"));
         var dir  = slash >= 0 ? fsName.substring(0, slash + 1) : "";
         var base = slash >= 0 ? fsName.substring(slash + 1)    : fsName;
         var dot  = base.lastIndexOf(".");
-        if (dot < 0) return dir + base + "_" + lang;
-        return dir + base.substring(0, dot) + "_" + lang + base.substring(dot);
+        if (dot < 0) return dir + base + "_" + langUp;
+        return dir + base.substring(0, dot) + "_" + langUp + base.substring(dot);
     }
 
     // ── dialog ────────────────────────────────────────────────────────
@@ -575,6 +578,24 @@
 
     if (progress) progress.close();
 
+    // OS-level probe for a running Media Encoder process. Used to decide
+    // whether queueInAME(false) will actually be received — AME has to be
+    // up for a false-arg dispatch to land. queueInAME(true) launches AME
+    // itself (and also starts its queue), which is why we can't use (true)
+    // "just to launch" without also auto-starting the render.
+    function isAMERunning() {
+        try {
+            if ($.os.indexOf("Mac") >= 0) {
+                var out = system.callSystem("pgrep -if 'Adobe Media Encoder' 2>/dev/null");
+                return !!(out && out.replace(/\s/g, "") !== "");
+            } else if ($.os.indexOf("Windows") >= 0) {
+                var out2 = system.callSystem('tasklist /FI "IMAGENAME eq Adobe Media Encoder.exe" /NH 2>NUL');
+                return !!(out2 && out2.toLowerCase().indexOf("adobe media encoder") !== -1);
+            }
+        } catch (eR) {}
+        return false; // couldn't detect → safer to assume not running
+    }
+
     function runAMEDispatch(progress) {
         // Preconditions
         if (!proj.file) {
@@ -590,6 +611,19 @@
                   "Adobe Media Encoder isn't available to receive the queue.\n"
                 + "Make sure AME is installed and that at least one queue item\n"
                 + "has its Render flag enabled in AE's render queue.");
+            return null;
+        }
+
+        // If the user wants "queue but don't start", AME has to already be
+        // running — queueInAME(false) silently no-ops when AME is closed.
+        // (queueInAME(true) would launch AME but also start its queue,
+        // defeating the point of unchecking "Start immediately".)
+        if (!startAMEAtEnd && !isAMERunning()) {
+            greyAlert("Render Languages",
+                  "Adobe Media Encoder isn't currently running.\n\n"
+                + "Either open AME first, or check \"Start AME queue immediately\" "
+                + "in the dialog — that option launches AME and starts the render.\n\n"
+                + "Without one of these, dispatches to AME are silently dropped.");
             return null;
         }
 
@@ -619,7 +653,8 @@
 
         for (var pLa = 0; pLa < pickedCodes.length; pLa++) {
             var langA = pickedCodes[pLa];
-            var variantFile = new File(origDirFs + "/" + origStem + "_" + langA + origExt);
+            var langUp = langA.toUpperCase();
+            var variantFile = new File(origDirFs + "/" + origStem + "_" + langUp + origExt);
             var entry = { lang: langA, variantPath: variantFile.fsName, queued: false, skipped: false, error: null };
 
             // Progress + cancel check at the top of each iteration.
@@ -753,18 +788,14 @@
                 continue;
             }
 
-            // Pass `true` on the FIRST iteration so AME launches if it
-            // wasn't already running — queueInAME(false) is a no-op when
-            // AME isn't reachable, which would silently drop the dispatch.
-            // Also pass `true` on the LAST iteration if the user checked
-            // "Start AME queue immediately". All other middle iterations
-            // pass `false` so AME queues without starting a second time
-            // (no-op anyway since AME is already processing).
-            var isFirst = (pLa === 0);
-            var isLast  = (pLa === pickedCodes.length - 1);
-            var startNow = isFirst || (isLast && startAMEAtEnd);
+            // Pass the user's startAMEAtEnd preference on every call:
+            //   true  → AME launches if needed AND starts processing
+            //   false → items are added to AME's queue without starting
+            //           (requires AME to already be running — we checked
+            //           this upfront in runAMEDispatch, so by this point
+            //           AME is reachable).
             try {
-                rq.queueInAME(startNow);
+                rq.queueInAME(startAMEAtEnd);
                 entry.queued = true;
             } catch (eQ) {
                 entry.error = "queueInAME failed: " + eQ;

@@ -83,6 +83,16 @@ optional flat _grade/ folder for Resolve returns:
     dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
     dlg.spacing = 10; dlg.margins = 14;
 
+    var about = dlg.add("statictext", undefined,
+          "Scans every *_comp composition, pulls finished VFX renders "
+        + "from each {shot}/render/ folder and Resolve grades from the "
+        + "flat {shots}/_grade/ folder, and imports them back into the "
+        + "project. Results land inside each {shot}_footage precomp "
+        + "stacked newest-on-top (grade > render > plate), with only "
+        + "the topmost per category enabled.",
+        { multiline: true });
+    about.preferredSize = [520, 72];
+
     var pnl = dlg.add("panel", undefined, "Settings");
     pnl.orientation = "column"; pnl.alignChildren = ["fill", "top"];
     pnl.spacing = 6; pnl.margins = [10, 15, 10, 10];

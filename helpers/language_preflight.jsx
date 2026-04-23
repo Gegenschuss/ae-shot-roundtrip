@@ -102,14 +102,33 @@
         return;
     }
 
-    // Sort: by comp name, then code, then layer name.
-    entries.sort(function (a, b) {
-        var an = a.comp.name.toLowerCase(), bn = b.comp.name.toLowerCase();
-        if (an !== bn) return an < bn ? -1 : 1;
-        if (a.code !== b.code) return a.code < b.code ? -1 : 1;
-        var al = String(a.layer.name).toLowerCase(), bl = String(b.layer.name).toLowerCase();
-        return al < bl ? -1 : (al > bl ? 1 : 0);
-    });
+    // Sort state. Columns: 0 = Comp, 1 = Layer, 2 = Lang, 3 = Via, 4 = State.
+    // Default: by comp name, ascending. Secondary tie-break always follows
+    // (comp → layer → code) so same-value rows stay visually grouped.
+    var sortKey = 0;
+    var sortDir = 1;  // 1 = asc, -1 = desc
+    function sortEntries() {
+        entries.sort(function (a, b) {
+            var av, bv;
+            if (sortKey === 0)      { av = a.comp.name;         bv = b.comp.name;         }
+            else if (sortKey === 1) { av = String(a.layer.name); bv = String(b.layer.name); }
+            else if (sortKey === 2) { av = a.code;              bv = b.code;              }
+            else if (sortKey === 3) { av = a.source;            bv = b.source;            }
+            else {
+                var ae = false, be = false;
+                try { ae = !!a.layer.enabled; } catch (eA) {}
+                try { be = !!b.layer.enabled; } catch (eB) {}
+                av = ae ? 1 : 0; bv = be ? 1 : 0;
+            }
+            if (typeof av === "string") { av = av.toLowerCase(); bv = bv.toLowerCase(); }
+            if (av !== bv) return (av < bv ? -1 : 1) * sortDir;
+            if (a.comp.name !== b.comp.name) return a.comp.name < b.comp.name ? -1 : 1;
+            if (a.code !== b.code) return a.code < b.code ? -1 : 1;
+            var al = String(a.layer.name), bl = String(b.layer.name);
+            return al < bl ? -1 : (al > bl ? 1 : 0);
+        });
+    }
+    sortEntries();
 
     var codesList = [];
     for (var k in byCode) codesList.push(k);
@@ -144,6 +163,29 @@
     fRow.add("statictext", undefined, "Filter language:");
     var filterDD = fRow.add("dropdownlist", undefined, ["(all)"].concat(codesList));
     filterDD.selection = 0;
+    fRow.add("statictext", undefined, "    Sort:");
+    var SORT_LABELS = ["Comp", "Layer", "Lang", "Via", "State"];
+    var sortBtns = [];
+    for (var sb = 0; sb < SORT_LABELS.length; sb++) {
+        var b = fRow.add("button", undefined, SORT_LABELS[sb]);
+        b.preferredSize = [80, 22];
+        b.onClick = (function (col) {
+            return function () {
+                if (sortKey === col) sortDir = -sortDir; else { sortKey = col; sortDir = 1; }
+                sortEntries();
+                populate(currentFilter);
+                refreshSortBtnLabels();
+            };
+        })(sb);
+        sortBtns.push(b);
+    }
+    function refreshSortBtnLabels() {
+        for (var i = 0; i < sortBtns.length; i++) {
+            var arrow = (i === sortKey) ? (sortDir === 1 ? "  ↓" : "  ↑") : "";
+            sortBtns[i].text = SORT_LABELS[i] + arrow;
+        }
+    }
+    refreshSortBtnLabels();
 
     // Listbox with columns. Height scales with entry count, capped at
     // roughly the screen height minus room for the dialog's other panels
@@ -182,11 +224,13 @@
             if (wasSel) lb.selection = 0;
         }
     }
+    var currentFilter = null;
     filterDD.onChange = function () {
         var pick = filterDD.selection ? filterDD.selection.text : "(all)";
-        populate(pick === "(all)" ? null : pick);
+        currentFilter = (pick === "(all)") ? null : pick;
+        populate(currentFilter);
     };
-    populate(null);
+    populate(currentFilter);
 
     // Buttons
     var btnGrp = dlg.add("group");

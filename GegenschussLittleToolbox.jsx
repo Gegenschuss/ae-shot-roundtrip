@@ -139,17 +139,17 @@
         // ── Language ──────────────────────────────────────────────────────
         {
             group:  "Language",
-            icon:   "◎",
-            label:  "Language Preflight",
-            tip:    "Audit all language-tagged layers across the project before a batch render. Shows comp / layer / code / source (comment or name) / on-off state in a multi-column list, filterable by language. Reveal selected layer jumps to it in its comp. Copy as text dumps the audit to the clipboard. Read-only — never mutates the project.",
-            file:   "helpers/language_preflight.jsx"
-        },
-        {
-            group:  "Language",
             icon:   "◐",
             label:  "Toggle Language",
             tip:    "Project-wide language switch. Walks every comp in the project, detects layers tagged via layer.comment \"lang:XX\" or layer name suffix \"_lang_XX\" (case-insensitive — \"_LANG_DE\", \"Lang: en\" all work; XX = 2-8 letter/digit/underscore code), and enables the picked language while disabling siblings in other languages. Untagged layers are left alone. Mirrors the audio switch so dubbed audio swaps alongside visuals. Last-used language is remembered across sessions.",
             file:   "helpers/toggle_language.jsx"
+        },
+        {
+            group:  "Language",
+            icon:   "◎",
+            label:  "Language Preflight",
+            tip:    "Audit all language-tagged layers across the project before a batch render. Shows comp / layer / code / source (comment or name) / on-off state in a multi-column list, filterable by language. Reveal selected layer jumps to it in its comp. Copy as text dumps the audit to the clipboard. Read-only — never mutates the project.",
+            file:   "helpers/language_preflight.jsx"
         },
         {
             group:  "Language",

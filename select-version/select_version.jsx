@@ -130,9 +130,78 @@ Single undo step on OK.
     dlg.spacing = 10;
     dlg.margins = 14;
 
+    var about = dlg.add("statictext", undefined,
+          "Central picker for every shot's active variant. Each shot's "
+        + "_footage/_stack precomp stacks variants top=newest; this tool "
+        + "lets you see and set which variant is enabled across the whole "
+        + "project. Bulk-set selected to latest, set ALL to latest, or "
+        + "disable everything in one click. Like Nuke Studio's "
+        + "select-version, but project-wide.",
+        { multiline: true });
+    about.preferredSize = [660, 72];
+
     dlg.add("statictext", undefined,
         shots.length + " shot" + (shots.length === 1 ? "" : "s")
         + " with variants. Select rows and pick a variant below, or use the bulk buttons.");
+
+    // Sort controls. Click a column to sort; click same column again to flip
+    // direction. shots[] and desired[] are parallel arrays — we reorder both
+    // in lock-step via an index permutation so all existing desired[i]
+    // lookups stay correct.
+    var svSortKey = -1, svSortDir = 1;
+    function svSortLists() {
+        if (svSortKey < 0) return;
+        var idx = [];
+        for (var i = 0; i < shots.length; i++) idx.push(i);
+        idx.sort(function (ai, bi) {
+            var av, bv;
+            if (svSortKey === 0) {
+                av = shots[ai].shotComp.name;
+                bv = shots[bi].shotComp.name;
+            } else {
+                av = variantLabel(shots[ai], desired[ai]);
+                bv = variantLabel(shots[bi], desired[bi]);
+            }
+            av = String(av || "").toLowerCase(); bv = String(bv || "").toLowerCase();
+            if (av !== bv) return (av < bv ? -1 : 1) * svSortDir;
+            return 0;
+        });
+        var newShots = [], newDesired = [];
+        for (var k = 0; k < idx.length; k++) {
+            newShots.push(shots[idx[k]]);
+            newDesired.push(desired[idx[k]]);
+        }
+        for (var m = 0; m < idx.length; m++) {
+            shots[m]   = newShots[m];
+            desired[m] = newDesired[m];
+        }
+    }
+    var svSortRow = dlg.add("group");
+    svSortRow.orientation = "row"; svSortRow.alignChildren = ["left", "center"];
+    svSortRow.spacing = 4;
+    svSortRow.add("statictext", undefined, "Sort:");
+    var SV_LABELS = ["Shot", "Active Variant"];
+    var svBtns = [];
+    for (var svs = 0; svs < SV_LABELS.length; svs++) {
+        var svb = svSortRow.add("button", undefined, SV_LABELS[svs]);
+        svb.preferredSize = [120, 22];
+        svb.onClick = (function (col) {
+            return function () {
+                if (svSortKey === col) svSortDir = -svSortDir;
+                else { svSortKey = col; svSortDir = 1; }
+                svSortLists();
+                svRepopulate();
+                svRefreshBtns();
+            };
+        })(svs);
+        svBtns.push(svb);
+    }
+    function svRefreshBtns() {
+        for (var i = 0; i < svBtns.length; i++) {
+            var arrow = (i === svSortKey) ? (svSortDir === 1 ? "  ↓" : "  ↑") : "";
+            svBtns[i].text = SV_LABELS[i] + arrow;
+        }
+    }
 
     // Scrollable list: native listbox with multi-select.
     var lb = dlg.add("listbox", undefined, undefined, {
@@ -149,7 +218,12 @@ Single undo step on OK.
         var item = lb.add("item", sh.shotComp.name);
         item.subItems[0].text = variantLabel(sh, desired[i]);
     }
-    for (var rI = 0; rI < shots.length; rI++) populateRow(rI);
+    function svRepopulate() {
+        try { lb.removeAll(); } catch (eRA) {}
+        for (var rI = 0; rI < shots.length; rI++) populateRow(rI);
+    }
+    svRepopulate();
+    svRefreshBtns();
 
     function refreshRow(i) {
         try {

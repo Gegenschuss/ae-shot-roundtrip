@@ -161,12 +161,33 @@
         return;
     }
 
-    // Sort: comp, then layer, then effect
-    entries.sort(function (a, b) {
-        if (a.compName  !== b.compName)  return a.compName  < b.compName  ? -1 : 1;
-        if (a.layerName !== b.layerName) return a.layerName < b.layerName ? -1 : 1;
-        return a.effectName < b.effectName ? -1 : (a.effectName > b.effectName ? 1 : 0);
-    });
+    // Sort helpers — `sortKey` and `sortDir` govern the current order.
+    // Columns: 0 = Comp, 1 = Layer, 2 = Effect, 3 = State. State sorts by
+    // the live effect.enabled value so toggles + re-sort groups correctly.
+    var SORT_KEYS = ["comp", "layer", "effect", "state"];
+    var sortKey = 0;   // default: Comp
+    var sortDir = 1;   // 1 = asc, -1 = desc
+    function stateText(on) { return on ? "On" : "Off"; }
+    function isEnabled(ent) {
+        try { return !!ent.effect.enabled; } catch (eE) { return true; }
+    }
+    function sortEntries() {
+        entries.sort(function (a, b) {
+            var av, bv;
+            if (sortKey === 0)      { av = a.compName;   bv = b.compName;   }
+            else if (sortKey === 1) { av = a.layerName;  bv = b.layerName;  }
+            else if (sortKey === 2) { av = a.effectName; bv = b.effectName; }
+            else                    { av = isEnabled(a) ? 1 : 0; bv = isEnabled(b) ? 1 : 0; }
+            if (typeof av === "string") { av = av.toLowerCase(); bv = bv.toLowerCase(); }
+            // Primary sort, with stable secondary tie-break to keep
+            // same-value rows visually grouped (comp, then layer, then effect).
+            if (av !== bv) return (av < bv ? -1 : 1) * sortDir;
+            if (a.compName  !== b.compName)  return a.compName  < b.compName  ? -1 : 1;
+            if (a.layerName !== b.layerName) return a.layerName < b.layerName ? -1 : 1;
+            return a.effectName < b.effectName ? -1 : (a.effectName > b.effectName ? 1 : 0);
+        });
+    }
+    sortEntries();
 
     // ── UI ───────────────────────────────────────────────────────────────────
     var dlg = new Window("dialog", "Color-Modification Effects");
@@ -179,6 +200,37 @@
         entries.length + " color effect" + (entries.length === 1 ? "" : "s")
         + " in " + scanLabel + " (recursive). Select rows and toggle, or use the bulk buttons.");
 
+    // Sort button row — ScriptUI listbox headers aren't clickable, so we
+    // expose sort as a button row mimicking that interaction. Click a
+    // column to sort by it; click the same column again to flip direction.
+    var sortRow = dlg.add("group");
+    sortRow.orientation = "row"; sortRow.alignChildren = ["left", "center"];
+    sortRow.spacing = 4; sortRow.margins = [0, 0, 0, 0];
+    sortRow.add("statictext", undefined, "Sort:");
+    var SORT_LABELS = ["Comp", "Layer", "Effect", "State"];
+    var sortBtns = [];
+    for (var sb = 0; sb < SORT_LABELS.length; sb++) {
+        var b = sortRow.add("button", undefined, SORT_LABELS[sb]);
+        b.preferredSize = [95, 22];
+        b.__col = sb;
+        b.onClick = (function (col) {
+            return function () {
+                if (sortKey === col) sortDir = -sortDir; else { sortKey = col; sortDir = 1; }
+                sortEntries();
+                repopulate();
+                refreshSortBtnLabels();
+            };
+        })(sb);
+        sortBtns.push(b);
+    }
+    function refreshSortBtnLabels() {
+        for (var i = 0; i < sortBtns.length; i++) {
+            var arrow = (i === sortKey) ? (sortDir === 1 ? "  ↓" : "  ↑") : "";
+            sortBtns[i].text = SORT_LABELS[i] + arrow;
+        }
+    }
+    refreshSortBtnLabels();
+
     var lb = dlg.add("listbox", undefined, undefined, {
         multiselect: true,
         numberOfColumns: 4,
@@ -188,16 +240,18 @@
     });
     lb.preferredSize = [640, 560];
 
-    function stateText(on) { return on ? "On" : "Off"; }
-
     function populateRow(idx) {
         var ent  = entries[idx];
         var item = lb.add("item", ent.compName);
         item.subItems[0].text = ent.layerName;
         item.subItems[1].text = ent.effectName;
-        var on = true;
-        try { on = ent.effect.enabled; } catch (eR) {}
-        item.subItems[2].text = stateText(on);
+        item.subItems[2].text = stateText(isEnabled(ent));
+    }
+    function repopulate() {
+        // Clearing + re-adding loses selection by design — after a re-sort
+        // the indices don't mean the same rows anyway.
+        try { lb.removeAll(); } catch (eRA) {}
+        for (var r2 = 0; r2 < entries.length; r2++) populateRow(r2);
     }
     for (var r = 0; r < entries.length; r++) populateRow(r);
 
