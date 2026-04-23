@@ -46,8 +46,14 @@
             file:   "import-renders/import_renders.jsx"
         },
         {
+            group:  "Roundtrip",
+            label:  "Select Version",
+            tip:    "Central picker for every shot's active variant. Lists all *_comp shots with a dropdown of the variants stacked in their _footage/_stack precomp (top = newest). Bulk buttons to select all rows, set everything to latest, or disable all. Like Nuke Studio's select-version, but project-wide.",
+            file:   "select-version/select_version.jsx"
+        },
+        {
             group:  "SynthEyes",
-            label:  "Convert JSX \u2192 AEP",
+            label:  "Convert JSX → AEP",
             tip:    "Batch-run SynthEyes-exported .jsx files and save each result as a .aep project.",
             file:   "syntheyes-convert-jsx-to-aep/batch_syntheyes_to_ae.jsx"
         },
@@ -56,19 +62,9 @@
             label:  "Import AEP to AE",
             tip:    "Import SynthEyes .aep files and wire each one into its matching shot folder.",
             file:   "syntheyes-import-aep-to-ae/import_syntheyes_aeps_to_shots.jsx"
-        },
-        {
-            group:  "Helpers",
-            label:  "Export Fresh Shot XML",
-            tip:    "Export an FCPXML 1.8 timeline from all *_comp compositions for import in DaVinci Resolve.",
-            file:   "export-shot-xml/export_shot_xml.jsx"
-        },
-        {
-            group:  "Helpers",
-            label:  "Create dynamicLink Comps",
-            tip:    "Standalone dynamicLink builder. Prompts for handle frames, then for each selected precomp or footage layer creates a wrapper comp with full cut+2\u00d7handles duration (black padded) in /Shots/dynamicLink.",
-            file:   "create-dynamiclink-comps/create_dynamiclink_comps.jsx"
         }
+        // Export Shot XML + Create dynamicLink Comps live in the
+        // Little Toolbox under the "Project" group.
     ];
 
     // ── helpers ────────────────────────────────────────────────────────────────
@@ -120,7 +116,7 @@
         brandCol.orientation = "column";
         brandCol.alignment = ["left", "center"];
         brandCol.spacing = 2;
-        var buildDate = brandCol.add("statictext", undefined, "20260422");
+        var buildDate = brandCol.add("statictext", undefined, "20260423");
         // NOTE to editor: keep this date in sync with ship day (YYYYMMDD).
         buildDate.graphics.font = ScriptUI.newFont("Helvetica", "REGULAR", 11);
         buildDate.graphics.foregroundColor = buildDate.graphics.newPen(buildDate.graphics.PenType.SOLID_COLOR, [0.55, 0.55, 0.55, 1], 1);
@@ -157,10 +153,10 @@
         closeRow.orientation = "row";
         closeRow.alignment   = ["right", "bottom"];
         closeRow.margins     = [4, 0, 4, 0];
-        var toolboxBtn = closeRow.add("button", undefined, "\u2692 Toolbox");
+        var toolboxBtn = closeRow.add("button", undefined, "⚒ Toolbox");
         toolboxBtn.preferredSize = [90, 22];
         toolboxBtn.helpTip = "Open Little Toolbox";
-        toolboxBtn.onClick = function () { runScript("little-toolbox/GegenschussLittleToolbox.jsx"); };
+        toolboxBtn.onClick = function () { runScript("GegenschussLittleToolbox.jsx"); };
 
         if (win instanceof Window) {
             win.center();

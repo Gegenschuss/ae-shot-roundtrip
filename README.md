@@ -545,8 +545,9 @@ syntheyes-import-aep-to-ae/          # SynthEyes AEP import/wire-up
 import-renders/                      # VFX render re-import
 re-render-plates/                    # Re-render plates for denoising / stabilization
 create-dynamiclink-comps/            # Standalone Dynamic Link builder
-little-toolbox/                      # Little Toolbox launcher panel
-helpers/                             # Little Toolbox scripts: mute audio, guide preview, reverse-stretch → remap, precompose trimmed, copy comp markers, extend precomp handles
+import-comp-grades/                  # Comp Grade Roundtrip importer
+GegenschussLittleToolbox.jsx         # Little Toolbox launcher panel (sibling of the main panel)
+helpers/                             # Little Toolbox scripts: mute audio, guide preview, reverse-stretch → remap, precompose trimmed, copy comp markers, extend precomp handles, toggle language, list color effects, invert transform, work-area-to-cut-markers
 premiere-trim-handles-close-gaps/    # Premiere Pro companion extension
 ```
 

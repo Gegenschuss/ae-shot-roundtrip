@@ -32,7 +32,22 @@
  *   File → Import Timeline → Import AAF, EDL, XML…
  *
  * When launched standalone a Settings dialog offers:
- *   "Trim to Editorial Cut (Experimental)"
+ *   Source mode:
+ *     - "Shots folder" (default): scan for *_comp comps under "Shots"
+ *       as described above. One clip per shot, appended head-to-tail on
+ *       a single sequence track.
+ *     - "Active composition": dump every footage layer in the currently
+ *       open comp straight to XML at its own timeline position. One track
+ *       per AE layer (AE layer 1 → top XML track). The export half of
+ *       the Comp Grade Roundtrip — pairs with Import Comp Grades to
+ *       round-trip a single comp through Resolve without using the full
+ *       shot-by-shot workflow. Intended for comps assembled outside the
+ *       roundtrip (e.g. a reference edit built by hand that you want to
+ *       grade). "Visible layers only" checkbox (default on) skips guide
+ *       + disabled layers; uncheck to export every footage layer
+ *       regardless of state. Time-remap is exported as a straight span
+ *       with a warning.
+ *   "Trim to Editorial Cut (Experimental)" — Shots folder mode only:
  *     - Unchecked (default): full clips — source AND sequence span both
  *       cover `_comp.workArea` (clip + handles) at native speed. Stable,
  *       matches the original XML export behaviour.
@@ -446,19 +461,44 @@
     // Default = full clips (clip + handles) with native-speed sequence spans —
     // the stable path that's been shipping. Opt-in to the experimental
     // mainComp-chain trim via the checkbox.
-    var trimToCut = false;
+    //
+    // Source mode:
+    //   "shots"      — scan the project's Shots folder for *_comp comps (default).
+    //   "activeComp" — dump every footage layer in the active comp straight
+    //                  to XML, at its current timeline position. Intended
+    //                  for comps assembled outside the roundtrip (e.g. a
+    //                  reference edit you built by hand and want to grade).
+    var trimToCut    = false;
+    var visibleOnly  = true;
+    var sourceMode   = "shots";
     if (!$.global.__shotRoundtripXMLDir) {
         var dlg = new Window("dialog", "Export Shot XML");
         dlg.orientation = "column"; dlg.alignChildren = ["fill", "top"];
         dlg.spacing = 10; dlg.margins = 14;
 
-        var pnl = dlg.add("panel", undefined, "Settings");
-        pnl.orientation = "column"; pnl.alignChildren = ["fill", "top"];
-        pnl.margins = [10, 15, 10, 10]; pnl.spacing = 6;
+        var srcPnl = dlg.add("panel", undefined, "Source");
+        srcPnl.orientation = "column"; srcPnl.alignChildren = ["left", "top"];
+        srcPnl.margins = [10, 15, 10, 10]; srcPnl.spacing = 4;
+        var rbShots  = srcPnl.add("radiobutton", undefined, "Shots folder  (every *_comp under the \"Shots\" folder)");
+        var rbActive = srcPnl.add("radiobutton", undefined, "Active composition  (every footage layer in the current comp)");
+        rbShots.value  = true;
 
-        var chkTrim = pnl.add("checkbox", undefined,
-            "Trim to Editorial Cut (Experimental)");
+        var optPnl = dlg.add("panel", undefined, "Options");
+        optPnl.orientation = "column"; optPnl.alignChildren = ["fill", "top"];
+        optPnl.margins = [10, 15, 10, 10]; optPnl.spacing = 6;
+        var chkTrim = optPnl.add("checkbox", undefined,
+            "Trim to Editorial Cut (Experimental) — Shots folder mode only");
         chkTrim.value = false;
+        var chkVisible = optPnl.add("checkbox", undefined,
+            "Visible layers only (skip disabled + guide) — Active composition mode only");
+        chkVisible.value = true;
+        function refreshOptEnabled() {
+            chkTrim.enabled    = rbShots.value;
+            chkVisible.enabled = rbActive.value;
+        }
+        rbShots.onClick  = refreshOptEnabled;
+        rbActive.onClick = refreshOptEnabled;
+        refreshOptEnabled();
 
         var btnGrp = dlg.add("group");
         btnGrp.orientation = "row"; btnGrp.alignment = ["fill", "bottom"];
@@ -468,25 +508,37 @@
         btnCancel.onClick = function () { dlg.close(2); };
         btnExport.onClick = function () { dlg.close(1); };
         if (dlg.show() !== 1) return;
-        trimToCut = chkTrim.value;
-    }
-
-    var shotsFolder = findShotsFolder(proj.rootFolder);
-    if (!shotsFolder) {
-        alert("Could not find a folder named \"Shots\" in the project.");
-        return;
+        trimToCut   = chkTrim.value;
+        visibleOnly = chkVisible.value;
+        sourceMode  = rbActive.value ? "activeComp" : "shots";
     }
 
     var comps = [];
-    collectCompItems(shotsFolder, comps);
-    if (comps.length === 0) {
-        alert("No \"*_comp\" compositions found inside the Shots folder.");
-        return;
+    if (sourceMode === "shots") {
+        var shotsFolder = findShotsFolder(proj.rootFolder);
+        if (!shotsFolder) {
+            alert("Could not find a folder named \"Shots\" in the project.");
+            return;
+        }
+        collectCompItems(shotsFolder, comps);
+        if (comps.length === 0) {
+            alert("No \"*_comp\" compositions found inside the Shots folder.");
+            return;
+        }
+        comps.sort(function (a, b) {
+            return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1;
+        });
+    } else {
+        // activeComp mode: the current composition IS the sequence source.
+        var activeC = proj.activeItem;
+        if (!(activeC instanceof CompItem)) {
+            alert("Export XML: \"Active composition\" mode requires a composition to be open.");
+            return;
+        }
+        comps = [activeC];
+        projectBaseName = activeC.name; // sequence name reads the comp name, not the .aep stem
+        projectFileStem = projectBaseName.replace(/[\/\\:*?"<>|]/g, "_");
     }
-
-    comps.sort(function (a, b) {
-        return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1;
-    });
 
     // ─── gather clip data ────────────────────────────────────────────────────
 
@@ -494,13 +546,40 @@
     var warnings = [];
     var seqFps   = 0;
 
-    for (var c = 0; c < comps.length; c++) {
-        var comp  = comps[c];
+    // In activeComp mode each footage layer becomes its own clip,
+    // keyed by AE layer index → XML track index (higher AE index = further
+    // down the stack, maps to lower XML track). In shots mode there's one
+    // layer per comp so we append to a single track as before.
+    function buildClipsForCompShotsMode(comp) {
         var layer = pickFootageLayer(comp);
+        if (!layer) {
+            warnings.push(comp.name + ": no active footage layer — skipped.");
+            return;
+        }
+        buildClipFromLayer(comp, layer, null);
+    }
+
+    function buildClipsForActiveComp(comp) {
+        if (comp.frameRate > seqFps) seqFps = comp.frameRate;
+        for (var li = 1; li <= comp.numLayers; li++) {
+            var L = comp.layer(li);
+            if (!isFootageLayer(L)) continue;
+            // "Visible layers only" (checkbox, default on) skips guide layers
+            // (never render) and disabled layers (not in the cut). When off,
+            // every footage layer makes it into the XML regardless of state.
+            if (visibleOnly && (L.guideLayer || !L.enabled)) continue;
+            buildClipFromLayer(comp, L, li);
+        }
+        if (clips.length === 0) {
+            warnings.push(comp.name + ": no footage layers found.");
+        }
+    }
+
+    function buildClipFromLayer(comp, layer, layerIndex) {
 
         if (!layer) {
             warnings.push(comp.name + ": no active footage layer — skipped.");
-            continue;
+            return;
         }
 
         var compFps = comp.frameRate;
@@ -545,6 +624,63 @@
         var offsetSec = 0;
         if (isNested) {
             try { offsetSec = comp.workAreaStart || 0; } catch (eWA) {}
+        }
+
+        // ── activeComp mode: short-circuit timing from the layer itself ──
+        // Layer sits directly in the active comp. Its inPoint/outPoint give
+        // the sequence span in comp time, and startTime gives the source-
+        // time offset. Stretch is honoured; time-remap falls back to the
+        // layer's own in/out which already reflect any remap.
+        if (layerIndex !== null) {
+            var stretch = (layer.stretch !== 0) ? layer.stretch : 100;
+            var lIn  = layer.inPoint;
+            var lOut = layer.outPoint;
+            var seqDurSec   = Math.max(0, lOut - lIn);
+            // Source time range the layer actually plays through:
+            //   src = (compTime - layer.startTime) * (stretch/100)
+            var srcInSec, srcOutSec;
+            if (layer.timeRemapEnabled) {
+                // Time-remap: the layer's in/out already define the
+                // displayed source times via the remap keyframes. For a
+                // pragmatic export we treat it as a linear span covering
+                // source frames [in .. out] at comp time — speed math
+                // isn't round-tripped, but the clip lands on the timeline.
+                srcInSec  = lIn  - layer.startTime;
+                srcOutSec = lOut - layer.startTime;
+                warnings.push(comp.name + " / " + layer.name + ": time-remap present, exported without retime keys.");
+            } else {
+                srcInSec  = (lIn  - layer.startTime) * (stretch / 100);
+                srcOutSec = (lOut - layer.startTime) * (stretch / 100);
+            }
+            if (srcOutSec < srcInSec) {
+                var swp = srcInSec; srcInSec = srcOutSec; srcOutSec = swp;
+                warnings.push(comp.name + " / " + layer.name + ": reversed stretch, exported forward.");
+            }
+            var aInF  = Math.max(0, Math.round(srcInSec  * srcFps));
+            var aOutF = Math.min(totalDurF, Math.round(srcOutSec * srcFps));
+            if (aOutF <= aInF) aOutF = Math.min(totalDurF, aInF + 1);
+
+            clips.push({
+                n:            clips.length + 1,
+                name:         layer.source.file.displayName,
+                comp:         comp.name,
+                path:         layer.source.file.fsName,
+                compFps:      compFps,
+                srcFps:       srcFps,
+                width:        comp.width,
+                height:       comp.height,
+                srcInF:       aInF,
+                srcOutF:      aOutF,
+                durF:         aOutF - aInF,
+                totalDurF:    totalDurF,
+                fileTCFrame:  fileTCFrame,
+                mainSpanSec:  null,
+                // activeComp-only: timeline placement + track assignment
+                seqStartSec:  lIn,
+                seqDurSec:    seqDurSec,
+                trackIdx:     layerIndex   // AE layer index (1 = topmost)
+            });
+            return;
         }
 
         // Primary: walk UP via usedIn to find the outermost mainComp layer.
@@ -639,8 +775,18 @@
             durF:          durF,
             totalDurF:     totalDurF,   // from file header
             fileTCFrame:   fileTCFrame, // embedded TC start frame
-            mainSpanSec:   mainSpanSec  // null if chain-walk failed; else mainComp visible duration
+            mainSpanSec:   mainSpanSec,  // null if chain-walk failed; else mainComp visible duration
+            // activeComp-only fields left null in shots mode
+            seqStartSec:   null,
+            seqDurSec:     null,
+            trackIdx:      null
         });
+    }
+
+    // ── Drive the clip gathering ────────────────────────────────────────────
+    for (var c = 0; c < comps.length; c++) {
+        if (sourceMode === "activeComp") buildClipsForActiveComp(comps[c]);
+        else                             buildClipsForCompShotsMode(comps[c]);
     }
 
     if (clips.length === 0) {
@@ -650,34 +796,38 @@
 
     // ─── sequence-relative start/end (all in seqFps) ─────────────────────────
 
-    var seqHead = 0;
-    for (var i = 0; i < clips.length; i++) {
-        var cl = clips[i];
-        // Sequence span (<end> - <start>) in seqFps frames.
-        //
-        // Default "full clips" mode: source AND sequence span both cover the
-        // clip+handles range at native speed — the stable path, unchanged.
-        //
-        // Experimental "trim to cut" mode: mainSpanSec from the usedIn chain
-        // walk is the shot's actual duration in mainComp. For straight shots
-        // it equals source cut duration; for retimed / stretched / reversed
-        // shots it differs, and that ratio is what Resolve interprets as
-        // speed.
-        //
-        // Fallback when the chain walk failed: use durF/srcFps so the export
-        // matches the pre-chain behaviour.
-        var seqDurSec;
-        if (!trimToCut || cl.mainSpanSec === null) {
-            seqDurSec = cl.durF / cl.srcFps;
-        } else {
-            seqDurSec = cl.mainSpanSec;
+    var totalSeqF;
+    if (sourceMode === "activeComp") {
+        // Each clip keeps its own timeline position from the active comp.
+        var maxEnd = 0;
+        for (var i = 0; i < clips.length; i++) {
+            var cl = clips[i];
+            cl.durSeqF   = Math.max(1, Math.round(cl.seqDurSec * seqFps));
+            cl.seqStartF = Math.round(cl.seqStartSec * seqFps);
+            cl.seqEndF   = cl.seqStartF + cl.durSeqF;
+            if (cl.seqEndF > maxEnd) maxEnd = cl.seqEndF;
         }
-        cl.durSeqF   = Math.round(seqDurSec * seqFps);
-        cl.seqStartF = seqHead;
-        cl.seqEndF   = seqHead + cl.durSeqF;
-        seqHead += cl.durSeqF;
+        totalSeqF = maxEnd;
+    } else {
+        // Shots mode — clips are appended head-to-tail on one track (existing
+        // behaviour). durSeqF comes from mainSpanSec in trim-to-cut mode,
+        // else durF/srcFps (full clip at native speed).
+        var seqHead = 0;
+        for (var i = 0; i < clips.length; i++) {
+            var cl = clips[i];
+            var seqDurSec;
+            if (!trimToCut || cl.mainSpanSec === null) {
+                seqDurSec = cl.durF / cl.srcFps;
+            } else {
+                seqDurSec = cl.mainSpanSec;
+            }
+            cl.durSeqF   = Math.round(seqDurSec * seqFps);
+            cl.seqStartF = seqHead;
+            cl.seqEndF   = seqHead + cl.durSeqF;
+            seqHead += cl.durSeqF;
+        }
+        totalSeqF = seqHead;
     }
-    var totalSeqF = seqHead;
 
     // ─── build XML ───────────────────────────────────────────────────────────
 
@@ -717,22 +867,38 @@
     L.push('\t\t\t\t\t</samplecharacteristics>');
     L.push('\t\t\t\t</format>');
 
-    // video track
-    L.push('\t\t\t\t<track>');
+    // Group clips into tracks. Shots mode = one track with every clip;
+    // activeComp mode = one track per AE layer (AE layer N = XML track 1
+    // at the bottom, AE layer 1 = highest XML track on top).
+    var videoTracks = [];
+    if (sourceMode === "activeComp") {
+        var byIdx = {};
+        for (var gI = 0; gI < clips.length; gI++) {
+            var tI = clips[gI].trackIdx;
+            if (!byIdx[tI]) byIdx[tI] = [];
+            byIdx[tI].push(clips[gI]);
+        }
+        var idxKeys = [];
+        for (var kk in byIdx) idxKeys.push(parseInt(kk, 10));
+        // Emit bottom-of-stack first so the highest AE layer (smallest idx)
+        // ends up as the top XML track.
+        idxKeys.sort(function (a, b) { return b - a; });
+        for (var kkk = 0; kkk < idxKeys.length; kkk++) videoTracks.push(byIdx[idxKeys[kkk]]);
+    } else {
+        videoTracks.push(clips);
+    }
 
-    for (var i = 0; i < clips.length; i++) {
-        var cl = clips[i];
+    function emitVideoClipitem(cl, trackIdx) {
         var url = xmlEscape(toFileURL(cl.path));
-
         L.push('\t\t\t\t\t<clipitem id="clipitem-' + cl.n + '">');
         L.push('\t\t\t\t\t\t<masterclipid>masterclip-' + cl.n + '</masterclipid>');
         L.push('\t\t\t\t\t\t<name>'    + xmlEscape(cl.name) + '</name>');
         L.push('\t\t\t\t\t\t<enabled>TRUE</enabled>');
-        L.push('\t\t\t\t\t\t<duration>' + cl.durF + '</duration>');  // clip duration in srcFps
-        L.push(rateBlock(cl.srcFps, "\t\t\t\t\t\t"));               // native source fps
-        L.push('\t\t\t\t\t\t<start>' + cl.seqStartF + '</start>');  // sequence position in seqFps
+        L.push('\t\t\t\t\t\t<duration>' + cl.durF + '</duration>');
+        L.push(rateBlock(cl.srcFps, "\t\t\t\t\t\t"));
+        L.push('\t\t\t\t\t\t<start>' + cl.seqStartF + '</start>');
         L.push('\t\t\t\t\t\t<end>'   + cl.seqEndF   + '</end>');
-        L.push('\t\t\t\t\t\t<in>'    + cl.srcInF    + '</in>');     // source trim in srcFps
+        L.push('\t\t\t\t\t\t<in>'    + cl.srcInF    + '</in>');
         L.push('\t\t\t\t\t\t<out>'   + cl.srcOutF   + '</out>');
         L.push('\t\t\t\t\t\t<pproTicksIn>'  + pproTicks(cl.srcInF,  cl.srcFps) + '</pproTicksIn>');
         L.push('\t\t\t\t\t\t<pproTicksOut>' + pproTicks(cl.srcOutF, cl.srcFps) + '</pproTicksOut>');
@@ -740,12 +906,11 @@
         L.push('\t\t\t\t\t\t<pixelaspectratio>square</pixelaspectratio>');
         L.push('\t\t\t\t\t\t<anamorphic>FALSE</anamorphic>');
 
-        // file block
         L.push('\t\t\t\t\t\t<file id="file-' + cl.n + '">');
         L.push('\t\t\t\t\t\t\t<name>'    + xmlEscape(cl.name) + '</name>');
         L.push('\t\t\t\t\t\t\t<pathurl>' + url               + '</pathurl>');
-        L.push(rateBlock(cl.srcFps, "\t\t\t\t\t\t\t"));            // file's native fps
-        L.push('\t\t\t\t\t\t\t<duration>' + cl.totalDurF + '</duration>'); // in srcFps frames
+        L.push(rateBlock(cl.srcFps, "\t\t\t\t\t\t\t"));
+        L.push('\t\t\t\t\t\t\t<duration>' + cl.totalDurF + '</duration>');
         L.push('\t\t\t\t\t\t\t<timecode>');
         L.push(rateBlock(cl.srcFps, "\t\t\t\t\t\t\t\t"));
         L.push('\t\t\t\t\t\t\t\t<string>' + framesToTC(cl.fileTCFrame, cl.srcFps) + '</string>');
@@ -755,7 +920,7 @@
         L.push('\t\t\t\t\t\t\t<media>');
         L.push('\t\t\t\t\t\t\t\t<video>');
         L.push('\t\t\t\t\t\t\t\t\t<samplecharacteristics>');
-        L.push(rateBlock(cl.srcFps, "\t\t\t\t\t\t\t\t\t\t")); // match actual file fps
+        L.push(rateBlock(cl.srcFps, "\t\t\t\t\t\t\t\t\t\t"));
         L.push('\t\t\t\t\t\t\t\t\t\t<width>'  + cl.width  + '</width>');
         L.push('\t\t\t\t\t\t\t\t\t\t<height>' + cl.height + '</height>');
         L.push('\t\t\t\t\t\t\t\t\t\t<anamorphic>FALSE</anamorphic>');
@@ -773,15 +938,13 @@
         L.push('\t\t\t\t\t\t\t</media>');
         L.push('\t\t\t\t\t\t</file>');
 
-        // self-link (video)
         L.push('\t\t\t\t\t\t<link>');
         L.push('\t\t\t\t\t\t\t<linkclipref>clipitem-' + cl.n + '</linkclipref>');
         L.push('\t\t\t\t\t\t\t<mediatype>video</mediatype>');
-        L.push('\t\t\t\t\t\t\t<trackindex>1</trackindex>');
+        L.push('\t\t\t\t\t\t\t<trackindex>' + trackIdx + '</trackindex>');
         L.push('\t\t\t\t\t\t\t<clipindex>' + cl.n + '</clipindex>');
         L.push('\t\t\t\t\t\t</link>');
 
-        // metadata blocks (empty but required by Resolve's parser)
         L.push('\t\t\t\t\t\t<logginginfo>');
         L.push('\t\t\t\t\t\t\t<description></description>');
         L.push('\t\t\t\t\t\t\t<scene></scene>');
@@ -801,18 +964,21 @@
         L.push('\t\t\t\t\t\t<labels>');
         L.push('\t\t\t\t\t\t\t<label2>Iris</label2>');
         L.push('\t\t\t\t\t\t</labels>');
-
         L.push('\t\t\t\t\t</clipitem>');
     }
 
-    L.push('\t\t\t\t</track>');
+    for (var vT = 0; vT < videoTracks.length; vT++) {
+        var trackClips = videoTracks[vT];
+        var trackIdx   = vT + 1;
+        L.push('\t\t\t\t<track>');
+        for (var vC = 0; vC < trackClips.length; vC++) emitVideoClipitem(trackClips[vC], trackIdx);
+        L.push('\t\t\t\t</track>');
+    }
     L.push('\t\t\t</video>');
 
-    // ── audio track (two channels, linked to video clipitems) ─────────────
+    // ── audio: one track per video track, clips link back to video ────────
     L.push('\t\t\t<audio>');
-    L.push('\t\t\t\t<track>');
-    for (var i = 0; i < clips.length; i++) {
-        var cl = clips[i];
+    function emitAudioClipitem(cl, trackIdx) {
         L.push('\t\t\t\t\t<clipitem id="clipitem-' + cl.n + '-audio">');
         L.push('\t\t\t\t\t\t<name>'     + xmlEscape(cl.name) + '</name>');
         L.push('\t\t\t\t\t\t<duration>' + cl.durF            + '</duration>');
@@ -833,7 +999,12 @@
         L.push('\t\t\t\t\t\t</link>');
         L.push('\t\t\t\t\t</clipitem>');
     }
-    L.push('\t\t\t\t</track>');
+    for (var aT = 0; aT < videoTracks.length; aT++) {
+        var aClips = videoTracks[aT];
+        L.push('\t\t\t\t<track>');
+        for (var aC = 0; aC < aClips.length; aC++) emitAudioClipitem(aClips[aC], aT + 1);
+        L.push('\t\t\t\t</track>');
+    }
     L.push('\t\t\t</audio>');
 
     L.push('\t\t</media>');
@@ -845,16 +1016,17 @@
     var _d = new Date();
     var dateStr = String(_d.getFullYear()) + pad2(_d.getMonth() + 1) + pad2(_d.getDate());
 
+    var fileSuffix = (sourceMode === "activeComp") ? "_comp_" : "_shots_";
     var saveFile;
     if ($.global.__shotRoundtripXMLDir) {
         // Called from roundtrip — save automatically into the shots folder
         var xmlDir = new Folder($.global.__shotRoundtripXMLDir);
         if (!xmlDir.exists) xmlDir.create();
-        saveFile = new File(xmlDir.fsName + "/" + projectFileStem + "_shots_" + dateStr + ".xml");
+        saveFile = new File(xmlDir.fsName + "/" + projectFileStem + fileSuffix + dateStr + ".xml");
     } else {
         // Standalone — show Save dialog
         var saveDir = proj.file ? proj.file.parent : Folder.desktop;
-        saveFile = new File(saveDir.fsName + "/" + projectFileStem + "_shots_" + dateStr + ".xml");
+        saveFile = new File(saveDir.fsName + "/" + projectFileStem + fileSuffix + dateStr + ".xml");
         saveFile = saveFile.saveDlg("Save XML for DaVinci Resolve", "XML files:*.xml,All files:*.*");
         if (!saveFile) return;
     }
@@ -890,7 +1062,12 @@
         statsPnl.margins = [12, 12, 12, 12]; statsPnl.spacing = 4;
         addRow(statsPnl, "Clips exported:",    clips.length);
         addRow(statsPnl, "Sequence duration:", framesToTC(totalSeqF, seqFps) + "  (" + totalSeqF + "f @ " + seqFps + ")");
-        addRow(statsPnl, "Mode:",              trimToCut ? "Trim to Editorial Cut (Experimental)" : "Full clips (clip + handles)");
+        var modeLabel = (sourceMode === "activeComp")
+                      ? "Active composition (" + projectBaseName + ")"
+                        + (visibleOnly ? " — visible layers only" : " — all footage layers")
+                      : (trimToCut ? "Shots folder — Trim to Editorial Cut (Experimental)"
+                                   : "Shots folder — full clips (clip + handles)");
+        addRow(statsPnl, "Mode:",              modeLabel);
 
         var filePnl = dlg.add("panel", undefined, "File");
         filePnl.orientation = "column"; filePnl.alignChildren = ["fill", "top"];

@@ -2553,8 +2553,12 @@ NOTES
                 // the markers collapse to the same instant instead of crossing.
                 if (cutDuration < 0) cutDuration = 0;
 
-                shotComp.workAreaStart    = fullStart;
-                shotComp.workAreaDuration = fullDurationSec;
+                // Work area = EDITORIAL CUT only (not cut+handles) so RAM
+                // preview and UI focus land on the visible cut. The render
+                // queue uses explicit timeSpanStart/Duration below, so the
+                // render range still covers cut+handles independently.
+                shotComp.workAreaStart    = cutStart;
+                shotComp.workAreaDuration = cutDuration;
                 shotComp.markerProperty.setValueAtTime(cutStart, cutMarker("cut in"));
                 shotComp.markerProperty.setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
 
@@ -2847,6 +2851,9 @@ NOTES
                     try {
                         containerComp.duration = shotCompDurSec;
                         containerComp.displayStartTime = 0;
+                        // Work area = editorial cut (same rationale as shotComp).
+                        containerComp.workAreaStart    = cutStart;
+                        containerComp.workAreaDuration = cutDuration;
                     } catch(eDur) {}
 
                     if (containerInner) {
