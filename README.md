@@ -408,18 +408,26 @@ work is underway. The pipeline is designed around this:
   Import Returns picks these up automatically; the shot-prefix
   matcher works on compound names at the first non-alphanumeric boundary.
 
-### SynthEyes
+### Project
 
-- **Convert JSX → AEP** — Batch-runs SynthEyes-exported `.jsx` files and
-  saves each result as an `.aep` project. The `.jsx` files are exported
-  from SynthEyes using the AE JavaScript exporter — important: select
-  **New Project**, not Run. SynthEyes is messy when adding projects to
-  already-open projects, so we create a new project file for every track.
-- **Import AEP to AE** — Imports SynthEyes `.aep` files and wires each one
-  into its matching shot folder.
+Project-level pipeline tools that operate on the whole project or active
+comp (vs. the layer-scoped Roundtrip tools above). Live in the panel's
+**Project** group.
 
-### Helpers
-
+- **Export Shot XML** — described above under the Roundtrip section.
+  Lives in the Project group — same script, two modes (Shots folder
+  full-roundtrip export, or Active composition for the Comp Grade
+  Roundtrip).
+- **Import Comp Grades** — The import half of the **Comp Grade
+  Roundtrip**. Pair to Export Shot XML's "Active composition" mode.
+  For each footage layer in the active comp, finds a matching graded
+  file in the `_grade/` folder (next to the AEP) and drops it in as a
+  new layer directly above the original. Matches by source-file stem
+  prefix — Resolve's "Use Unique Filenames" suffix (e.g. `_V1-0064`)
+  is fine; newest-by-modification-time wins if multiple versions are
+  present. Aligns by embedded source timecode (QuickTime `tmcd` atom)
+  so Resolve-rendered handles stack correctly; falls back to inPoint
+  alignment when TC can't be read.
 - **Create Dynamic Link Comps** — The Shot Roundtrip creates these
   automatically, but After Effects' "Reduce Project" and "Collect Files"
   can strip them out. This rebuilds them from the existing shot comps so
@@ -477,32 +485,24 @@ work is underway. The pipeline is designed around this:
   on the Burnin layer in mainComp (or on individual layers inside the
   Burnin precomp) manually. No helper script — mainComp is the render
   target, so configuration lives there.
-- **Reverse Stretch → Remap** *(Little Toolbox)* — For each selected
-  layer with negative stretch, rewrites the reversal as an equivalent
-  time remap: stretch back to `100`, time remap enabled, and two
-  keyframes at the layer's in and out that reproduce the reversed
-  playback. Shot Roundtrip runs the same conversion automatically;
-  this button exposes it standalone so you can preview or debug the
-  result on one layer at a time. Lives in the Little Toolbox panel
-  (click `⚒ Toolbox` at the bottom of the main panel).
-- **Precompose Trimmed** *(Little Toolbox)* — Precomposes each selected
-  layer individually with "move all attributes", sets the new precomp to
-  the full parent-comp duration, then trims the new precomp layer back
-  to the original in/out. Shot Roundtrip invokes this automatically as
-  part of its time-remap preflight (see Shot Roundtrip above). This
-  standalone button is available for manual use outside the roundtrip.
-- **Mute All Audio** *(Little Toolbox)* — Walks every selected layer and
-  recursively all layers inside any precomps they reference, muting
-  every audio switch it finds. One undo step for the whole run.
-- **Precomp to Guide Preview** *(Little Toolbox)* — Precomposes each
-  selected layer with "leave all attributes", scales the parent-comp
-  layer 2× to compensate, then inside the new precomp marks the inner
-  footage as a guide layer, halves its scale and position, and halves
-  the new precomp's dimensions (e.g. 4K UHD → HD). Net effect: a
-  half-resolution working copy that renders at its original size in the
-  parent comp, with the footage flagged as a guide so it doesn't
-  contribute to renders. Auto-strips AE's `.mov Comp N` suffix from the
-  new comp name and uses `_downrez` instead.
+### Companion repos
+
+Two sibling panels ship as their own repos. Install whichever you need
+alongside this one — neither is required for the core roundtrip flow,
+both stand on their own.
+
+- **[`ae-syntheyes-roundtrip`](https://github.com/Gegenschuss/ae-syntheyes-roundtrip)** —
+  SynthEyes ↔ AE bridge. Two batch helpers: **Convert JSX → AEP**
+  (run SynthEyes-exported `.jsx` files and save each as an `.aep`
+  project — pick **New Project** in SynthEyes, not Run) and
+  **Import AEP to AE** (import the resulting `.aep` files and wire
+  each into its matching shot folder).
+- **[`ae-little-toolbox`](https://github.com/Gegenschuss/ae-little-toolbox)** —
+  general-purpose AE helpers: precompose variants, language switching,
+  color-effect auditing, **Reverse Stretch → Remap**, **Precompose
+  Trimmed**, **Mute All Audio**, **Precomp to Guide Preview**, and so
+  on. Shot Roundtrip doesn't depend on it — the conversions it needs
+  are inlined.
 
 ## Premiere Pro companion — Trim Handles & Close Gaps
 
@@ -540,14 +540,10 @@ GegenschussShotRoundtrip.jsx               # Dockable launcher panel (entry poin
 
 shot-roundtrip/                      # Core roundtrip script
 export-shot-xml/                     # FCPXML export for Resolve
-syntheyes-convert-jsx-to-aep/        # SynthEyes → AEP batch
-syntheyes-import-aep-to-ae/          # SynthEyes AEP import/wire-up
 import-renders/                      # VFX render re-import
 re-render-plates/                    # Re-render plates for denoising / stabilization
 create-dynamiclink-comps/            # Standalone Dynamic Link builder
 import-comp-grades/                  # Comp Grade Roundtrip importer
-GegenschussLittleToolbox.jsx         # Little Toolbox launcher panel (sibling of the main panel)
-helpers/                             # Little Toolbox scripts: mute audio, guide preview, reverse-stretch → remap, precompose trimmed, copy comp markers, extend precomp handles, toggle language, list color effects, invert transform, work-area-to-cut-markers
 premiere-trim-handles-close-gaps/    # Premiere Pro companion extension
 ```
 

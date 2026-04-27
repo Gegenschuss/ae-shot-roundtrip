@@ -29,43 +29,75 @@
     var SCRIPTS = [
         {
             group:  "Roundtrip",
+            icon:   "⟲",
             label:  "Shot Roundtrip",
             tip:    "Extract selected shots for VFX work and re-import the renders back into the edit.",
             file:   "shot-roundtrip/shot_roundtrip.jsx"
         },
         {
             group:  "Roundtrip",
+            icon:   "⟳",
             label:  "Re-render Plates",
             tip:    "Re-render every shot's original plate to {shot}_{suffix}.mov ready for external denoising or stabilization, and import the results back into each _stack precomp as plate variants.",
             file:   "re-render-plates/re_render_plates.jsx"
         },
         {
             group:  "Roundtrip",
+            icon:   "⤓",
             label:  "Import Returns",
             tip:    "Scan all *_comp compositions for VFX renders (in each shot's render/ folder) and Resolve grades (in the flat _grade/ folder), and import them back into the project stacked grade > render > plate.",
             file:   "import-renders/import_renders.jsx"
         },
         {
             group:  "Roundtrip",
+            icon:   "⇕",
             label:  "Select Version",
             tip:    "Central picker for every shot's active variant. Lists all *_comp shots with a dropdown of the variants stacked in their _footage/_stack precomp (top = newest). Bulk buttons to select all rows, set everything to latest, or disable all. Like Nuke Studio's select-version, but project-wide.",
             file:   "select-version/select_version.jsx"
         },
         {
-            group:  "SynthEyes",
-            label:  "Convert JSX → AEP",
-            tip:    "Batch-run SynthEyes-exported .jsx files and save each result as a .aep project.",
-            file:   "syntheyes-convert-jsx-to-aep/batch_syntheyes_to_ae.jsx"
+            group:  "Project",
+            icon:   "↪",
+            label:  "Export Shot XML",
+            tip:    "Export an FCP7 XML for DaVinci Resolve. Two modes: \"Shots folder\" scans every *_comp under the Shots folder (one clip per shot, appended head-to-tail) — used by the full Shot Roundtrip. \"Active composition\" dumps every footage layer in the current comp at its own timeline position (one track per AE layer) — the export half of the Comp Grade Roundtrip, paired with Import Comp Grades.",
+            file:   "export-shot-xml/export_shot_xml.jsx"
         },
         {
-            group:  "SynthEyes",
-            label:  "Import AEP to AE",
-            tip:    "Import SynthEyes .aep files and wire each one into its matching shot folder.",
-            file:   "syntheyes-import-aep-to-ae/import_syntheyes_aeps_to_shots.jsx"
+            group:  "Project",
+            icon:   "↩",
+            label:  "Import Comp Grades",
+            tip:    "Import half of the Comp Grade Roundtrip. For each footage layer in the active comp, finds a matching graded file in the _grade/ folder (next to the AEP) and drops it in as a new layer directly above the original. Matches by source-file stem prefix — Resolve's \"Use Unique Filenames\" suffix (e.g. _V1-0064) is fine. Newest-by-modification-time wins if multiple versions are present. Aligns by embedded source timecode (QuickTime tmcd atom) so Resolve-rendered handles stack correctly; falls back to inPoint alignment when TC can't be read.",
+            file:   "import-comp-grades/import_comp_grades.jsx"
+        },
+        {
+            group:  "Project",
+            icon:   "⟡",
+            label:  "Create dynamicLink Comps",
+            tip:    "Standalone dynamicLink builder. Prompts for handle frames, then for each selected precomp or footage layer creates a wrapper comp with full cut + 2× handles duration (black padded) in /Shots/dynamicLink.",
+            file:   "create-dynamiclink-comps/create_dynamiclink_comps.jsx"
         }
-        // Export Shot XML + Create dynamicLink Comps live in the
-        // Little Toolbox under the "Project" group.
     ];
+
+    // Per-group foreground colors. Applied via button.graphics.foregroundColor —
+    // ScriptUI may ignore this on macOS Aqua-styled buttons; if icons come out
+    // grey everywhere, switch to iconbutton + PNG assets.
+    var GROUP_COLORS = {
+        "Roundtrip":  [0.45, 0.75, 1.00, 1.0], // cyan-ish
+        "Project":    [0.95, 0.85, 0.45, 1.0]  // gold
+    };
+
+    function buttonLabel(script) {
+        return script.icon + "  " + script.label;
+    }
+
+    function paintButton(btn, groupName) {
+        var c = GROUP_COLORS[groupName];
+        if (!c) return;
+        try {
+            var pen = btn.graphics.newPen(btn.graphics.PenType.SOLID_COLOR, c, 1);
+            btn.graphics.foregroundColor = pen;
+        } catch (ePc) {}
+    }
 
     // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -116,7 +148,7 @@
         brandCol.orientation = "column";
         brandCol.alignment = ["left", "center"];
         brandCol.spacing = 2;
-        var buildDate = brandCol.add("statictext", undefined, "20260423");
+        var buildDate = brandCol.add("statictext", undefined, "20260427");
         // NOTE to editor: keep this date in sync with ship day (YYYYMMDD).
         buildDate.graphics.font = ScriptUI.newFont("Helvetica", "REGULAR", 11);
         buildDate.graphics.foregroundColor = buildDate.graphics.newPen(buildDate.graphics.PenType.SOLID_COLOR, [0.55, 0.55, 0.55, 1], 1);
@@ -141,22 +173,13 @@
             for (var s = 0; s < SCRIPTS.length; s++) {
                 if (SCRIPTS[s].group !== groupName) continue;
                 (function (script) {
-                    var btn = panel.add("button", undefined, script.label);
+                    var btn = panel.add("button", undefined, buttonLabel(script));
                     btn.helpTip = script.tip;
+                    paintButton(btn, script.group);
                     btn.onClick = function () { runScript(script.file); };
                 })(SCRIPTS[s]);
             }
         }
-
-        // ── toolbox ────────────────────────────────────────────────────────────
-        var closeRow = win.add("group");
-        closeRow.orientation = "row";
-        closeRow.alignment   = ["right", "bottom"];
-        closeRow.margins     = [4, 0, 4, 0];
-        var toolboxBtn = closeRow.add("button", undefined, "⚒ Toolbox");
-        toolboxBtn.preferredSize = [90, 22];
-        toolboxBtn.helpTip = "Open Little Toolbox";
-        toolboxBtn.onClick = function () { runScript("GegenschussLittleToolbox.jsx"); };
 
         if (win instanceof Window) {
             win.center();
