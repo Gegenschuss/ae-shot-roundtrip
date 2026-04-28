@@ -1758,9 +1758,19 @@ NOTES
         for (var ri = 0; ri < selLayers.length; ri++) {
             if (cancelCheck()) return;
             var rTl = selLayers[ri].layer;
+            var rTlIdx = (selLayers[ri].mainLayerIdx != null) ? selLayers[ri].mainLayerIdx : rTl.index;
             var rEffects = scanSelLayerForEffects(rTl);
             for (var rE = 0; rE < rEffects.length; rE++) {
-                if (rEffects[rE].reversed) reversedList.push(rEffects[rE]);
+                if (rEffects[rE].reversed) {
+                    // Tag with the top-level mainComp index so the bake
+                    // step later can match a marked reversal to the
+                    // SPECIFIC shot it came from. Source-only matching
+                    // would falsely hit other shots that share the same
+                    // FootageItem (e.g. one instance forward + same clip
+                    // again reversed \u2192 both shots got baked, a bug).
+                    rEffects[rE].topMainIdx = rTlIdx;
+                    reversedList.push(rEffects[rE]);
+                }
             }
         }
 
@@ -2566,22 +2576,30 @@ NOTES
         if (!fsBakeRoot.exists) fsBakeRoot.create();
         if (!fsBakeRoot.exists) { alert("Could not create roundtrip folder:\n" + fsBakeRoot.fsName); progress.close(); return; }
 
-        // Capture the source FootageItem of every reversed layer the
-        // user marked "Bake" in the warning dialog, RIGHT NOW — before
-        // conversion + auto-precompose may invalidate the layer
-        // references. The post-render bake step (inside the import loop
-        // below) walks each shot's `_comp` tree for any of these sources
-        // and, when found, duplicates the auto-rendered plate inside
-        // `_stack`, applies stretch=-100, renders the stack out as a
-        // reversed variant, and places the result back into the stack.
+        // Capture, for each reversed layer the user marked "Bake" in the
+        // warning dialog, BOTH the source FootageItem (used for the
+        // "reset baked layer's time-remap to ascending in mainComp" pass
+        // below) AND the top-level mainComp layer index it was found
+        // under. The latter is what the post-render bake step matches
+        // against — using just the source FootageItem mis-fires when one
+        // instance of a clip is forward and another is reversed (both
+        // share the same source, so source-matching baked both shots).
+        // mainComp top-level indices are stable across precompose (it
+        // replaces in-place), so they survive the conversion + main
+        // loop intact.
         var bakeSources = [];
+        var bakeTopIdx  = {}; // { mainLayerIdx → true }
         if (revBakeLayers && revBakeLayers.length > 0) {
             for (var bli = 0; bli < revBakeLayers.length; bli++) {
                 var bl = revBakeLayers[bli].layer;
-                if (!bl) continue;
-                try {
-                    if (bl.source) bakeSources.push(bl.source);
-                } catch (eBSC) {}
+                if (bl) {
+                    try {
+                        if (bl.source) bakeSources.push(bl.source);
+                    } catch (eBSC) {}
+                }
+                if (revBakeLayers[bli].topMainIdx != null) {
+                    bakeTopIdx[revBakeLayers[bli].topMainIdx] = true;
+                }
             }
         }
 
@@ -3394,7 +3412,7 @@ NOTES
                         try { if (noticeNull.source) noticeNull.source.name = noticeNullName; } catch (eNullSrc) {}
                         noticeNull.label      = 1;     // Red
                         noticeNull.guideLayer = true;  // never rendered
-                        noticeNull.comment    = "Reimported variants (renders, grades) land here automatically. Any changes to this stack precomp will be overwritten by Shot Roundtrip.";
+                        noticeNull.comment    = "Do not modify — stack is auto-managed.";
                         noticeNull.moveToEnd();
                         noticeNull.locked     = true;
                     } catch (eNull) {}
@@ -3448,7 +3466,7 @@ NOTES
                 var pPath = new File(fsShotPlate.fsName + "/" + shotName + "_plate.mov");
                 om.file = pPath;
 
-                renderItems.push({ n: shotName, p: pPath, c: shotComp, s: fullStart, w: osWidth, h: osHeight, cs: cutStart, cd: cutDuration, bin: shotBin, rq: rq, pc: stackComp, src: source });
+                renderItems.push({ n: shotName, p: pPath, c: shotComp, s: fullStart, w: osWidth, h: osHeight, cs: cutStart, cd: cutDuration, bin: shotBin, rq: rq, pc: stackComp, src: source, mainLayerIdx: item.mainLayerIdx });
 
                 var cutDurationFrames = Math.round(cutDuration * safeFPS);
                 nukeDataList.push({
@@ -3936,6 +3954,7 @@ NOTES
                         nL.startTime = 0;
                         nL.position.setValue([ri.w/2, ri.h/2]);
                         nL.label = 11;
+                        try { nL.comment = "Reimported"; } catch (eNLC) {}
                         // Cut markers in precomp time (precomp t=0 represents
                         // source-time fullStart, so cut_in = ri.cs - ri.s).
                         var cutInPP  = ri.cs - ri.s;
@@ -3952,13 +3971,15 @@ NOTES
                         // stretch=-100 needs paired startTime juggling that
                         // setting it via script doesn't do, which is why
                         // the previous attempt rendered blank).
+                        // Match by the originating mainComp top-level
+                        // index, not by source. Two instances of the same
+                        // clip — one forward, one reversed — share a
+                        // FootageItem; source matching would incorrectly
+                        // bake BOTH shots. mainLayerIdx pins the bake to
+                        // the specific shot the user marked.
                         var bakeMatchedThisShot = false;
-                        if (bakeSources && bakeSources.length > 0) {
-                            for (var bki = 0; bki < bakeSources.length; bki++) {
-                                if (compTreeContainsSource(tComp, bakeSources[bki], {})) {
-                                    bakeMatchedThisShot = true; break;
-                                }
-                            }
+                        if (ri.mainLayerIdx != null && bakeTopIdx[ri.mainLayerIdx]) {
+                            bakeMatchedThisShot = true;
                         }
                         if (bakeMatchedThisShot) {
                             var bakedFolder = new Folder(fsBakeRoot.fsName + "/_baked");
