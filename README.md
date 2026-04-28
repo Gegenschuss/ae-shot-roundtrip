@@ -235,6 +235,31 @@ work is underway. The pipeline is designed around this:
     conversion as a standalone button so you can preview or debug
     it on one layer at a time.
 
+    **Bake** (default ON, per-row checkbox in the warning dialog).
+    For each reversed clip ticked Bake, after the main render
+    finishes the roundtrip wraps the shot's `_stack` precomp and
+    renders it back out as a forward-playing reversed plate
+    `{shot}_reversed.mov` into `{Roundtrip}/_baked/`. The baked
+    file is added to `_stack` as a top-layer variant (blue label).
+    The original mainComp layer's time-remap keys are mirrored
+    descending → ascending so the edit plays the cut **forward**
+    — pixel-matching the auto-rendered plate. The bake variant
+    in `_stack` is the explicit reverse, ready for difference-key
+    A/B against the natural plate or for use as the active plate
+    via Select Version. Bottom row of the dialog has
+    `Toggle Bake` / `Select All` / `Deselect All` for bulk
+    flipping; the Continue button updates live to "Continue: N
+    bake, M convert" so you see the split before you commit.
+
+    **Color Time-Reverse Layers** (button in the Settings dialog).
+    Walks the active comp's top-level layers in one undo step:
+    paints layers with negative stretch or descending time-remap
+    blue, everything else sandstone. Quick visual triage so you
+    can see at a glance which clips will trip the reversal warning
+    before you Run. The detection uses the same algorithm as the
+    warning scan, so what gets blued here is exactly what the
+    dialog will flag.
+
   - **Non-reversed time effects** (forward ramps, non-negative
     stretches) proceed silently. Top-level ones get auto-precomposed
     (see [Precompose Trimmed](#helpers)) so the plate renders forward
@@ -322,6 +347,15 @@ work is underway. The pipeline is designed around this:
   renders in the middle, plate variants at the bottom — with only the
   topmost enabled per category. The raw plate itself is never moved into
   the precomp.
+
+  Every `_stack` also gets the original forward source dropped in as a
+  **guide layer** (brown label, sits just above the warning Null at the
+  bottom). Guide layers don't render, so it's purely a visual reference
+  for difference-keying against any variant in the stack. Audio is
+  auto-muted on every layer except the topmost audio-bearing one, so
+  re-imports don't pile up duplicate audio. The "Managed by
+  Gegenschuss…" Null is always re-anchored as the bottommost layer
+  after every variant addition.
 
   <img src="docs/import_renders.png" width="340" alt="Import Returns dialog">
 

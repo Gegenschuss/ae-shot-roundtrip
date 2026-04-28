@@ -195,6 +195,59 @@ NOTES
         etHandles.preferredSize = [60, FIELD_H];
         r3.add("statictext", undefined, "frames");
 
+        // Color helper: paint the active comp's top-level layers sandstone,
+        // override REVERSED layers (negative stretch OR descending time-
+        // remap) to blue. Uses AE label slots 15 (Sandstone) and 8 (Blue) —
+        // slots are user-customisable in Preferences, same caveat as the
+        // rest of AE's label system. Detection mirrors the reversal scan
+        // (describeTimeEffect → .reversed), so what gets blued here is
+        // exactly what the warning dialog later flags.
+        var rColor = pnlMain.add("group");
+        rColor.orientation = "row"; rColor.alignChildren = ["left", "center"]; rColor.spacing = 8;
+        var rColorPad = rColor.add("statictext", undefined, ""); rColorPad.preferredSize = [LABEL_W, FIELD_H];
+        var btnColorTR = rColor.add("button", undefined, "Color Time-Reverse Layers");
+        btnColorTR.preferredSize = [220, FIELD_H + 2];
+        btnColorTR.helpTip = "Walk the active comp's top-level layers: paint everything sandstone, then paint reversed layers (negative stretch or descending time-remap) blue. Wraps in one undo step.";
+        var LABEL_SAND = 15;
+        var LABEL_BLUE = 8;
+        btnColorTR.onClick = function() {
+            try {
+                // mainComp isn't assigned until later in the script flow,
+                // so resolve via proj.activeItem here. The pre-dialog check
+                // already guarantees activeItem is a CompItem.
+                var comp = proj && proj.activeItem;
+                if (!comp || !(comp instanceof CompItem) || !comp.numLayers) {
+                    alert("No comp layers to color.");
+                    return;
+                }
+                app.beginUndoGroup("Color Time-Reverse Layers");
+                try {
+                    var painted = 0, hadReverse = 0;
+                    for (var li = 1; li <= comp.numLayers; li++) {
+                        var L = comp.layer(li);
+                        try {
+                            // describeTimeEffect returns null for layers
+                            // with no time effect; { reversed: bool, ... }
+                            // otherwise. Hoisted from elsewhere in this
+                            // function, so it's available here.
+                            var fx = null;
+                            try { fx = describeTimeEffect(L); } catch (eFx) {}
+                            var isRev = !!(fx && fx.reversed);
+                            L.label = isRev ? LABEL_BLUE : LABEL_SAND;
+                            painted++;
+                            if (isRev) hadReverse++;
+                        } catch (eL) {}
+                    }
+                    alert("Colored " + painted + " layer" + (painted === 1 ? "" : "s") +
+                          " — " + hadReverse + " reversed (blue), the rest sandstone.");
+                } finally {
+                    app.endUndoGroup();
+                }
+            } catch (eC) {
+                alert("Color Time-Reverse Layers failed:\n" + eC.message);
+            }
+        };
+
         // ── Pipeline Options ───────────────────────────
         var pnlOpt = dlg.add("panel", undefined, "Pipeline Options");
         pnlOpt.orientation = "column"; pnlOpt.alignChildren = ["fill", "top"];
@@ -643,15 +696,25 @@ NOTES
                 " " + (reversed.length === 1 ? "is" : "are") +
                 " in your selection (top-level or nested):");
 
+            // Per-row bake flags. Lives on the entry object so it survives
+            // sorts. Toggled via the Toggle Bake button below; default ON
+            // so every detected reversed clip bakes unless the user opts
+            // out (the bake is the safe choice — keeps a clean forward
+            // mainComp + a separate reversed plate for diff-key A/B).
+            for (var bf = 0; bf < reversed.length; bf++) {
+                if (typeof reversed[bf].bake !== "boolean") reversed[bf].bake = true;
+            }
+
             // Sort controls — ScriptUI listbox headers aren't clickable,
             // so we expose sort as a small button row above the list.
             var revSortKey = 0, revSortDir = 1;
             function revSortList() {
                 reversed.sort(function (a, b) {
                     var av, bv;
-                    if (revSortKey === 0)      { av = a.layerName; bv = b.layerName; }
-                    else if (revSortKey === 1) { av = a.path;      bv = b.path;      }
-                    else                       { av = a.label;     bv = b.label;     }
+                    if (revSortKey === 0)      { av = a.layerName;  bv = b.layerName;  }
+                    else if (revSortKey === 1) { av = a.path;       bv = b.path;       }
+                    else if (revSortKey === 2) { av = a.label;      bv = b.label;      }
+                    else                       { av = (a.bake?1:0); bv = (b.bake?1:0); }
                     av = String(av || "").toLowerCase(); bv = String(bv || "").toLowerCase();
                     if (av !== bv) return (av < bv ? -1 : 1) * revSortDir;
                     return 0;
@@ -661,7 +724,7 @@ NOTES
             revSortRow.orientation = "row"; revSortRow.alignChildren = ["left", "center"];
             revSortRow.spacing = 4;
             revSortRow.add("statictext", undefined, "Sort:");
-            var REV_LABELS = ["Layer", "Path", "Effect"];
+            var REV_LABELS = ["Layer", "Path", "Effect", "Bake"];
             var revBtns = [];
             for (var rs = 0; rs < REV_LABELS.length; rs++) {
                 var rb = revSortRow.add("button", undefined, REV_LABELS[rs]);
@@ -685,9 +748,10 @@ NOTES
             }
 
             var lb = w.add("listbox", undefined, [], {
-                numberOfColumns: 3, showHeaders: true,
-                columnTitles: ["Layer", "Path", "Effect"],
-                columnWidths: [240, 520, 220]
+                multiselect: true,
+                numberOfColumns: 4, showHeaders: true,
+                columnTitles: ["Layer", "Path", "Effect", "Bake"],
+                columnWidths: [240, 460, 200, 60]
             });
             function revRepopulate() {
                 try { lb.removeAll(); } catch (eRA) {}
@@ -695,6 +759,7 @@ NOTES
                     var row = lb.add("item", reversed[k].layerName);
                     row.subItems[0].text = reversed[k].path;
                     row.subItems[1].text = reversed[k].label;
+                    row.subItems[2].text = reversed[k].bake ? "✓" : "";
                 }
             }
             revSortList();
@@ -707,17 +772,81 @@ NOTES
                 { multiline: true });
             warn.preferredSize = [1000, 60];
 
+            var bakeHint = w.add("statictext", undefined,
+                "Tip: select one or more rows and click Toggle Bake to render those clips out as new forward-playing plates BEFORE the roundtrip. The layer's source is then swapped to the baked file and time effects are cleared, so re-runs see a clean forward plate.",
+                { multiline: true });
+            bakeHint.preferredSize = [1000, 50];
+
             var btnGrp = w.add("group");
-            btnGrp.alignment = ["right", "bottom"];
+            btnGrp.alignment = ["fill", "bottom"];
             btnGrp.margins = [0, 4, 0, 0];
+            var btnToggleBake = btnGrp.add("button", undefined, "Toggle Bake");
+            btnToggleBake.preferredSize = [120, 28];
+            btnToggleBake.helpTip = "Toggle the Bake flag on the selected row(s). (Hotkey: B)";
+            var btnBakeAll = btnGrp.add("button", undefined, "Select All");
+            btnBakeAll.preferredSize = [100, 28];
+            btnBakeAll.helpTip = "Highlight every row in the list. Combine with Toggle Bake to bulk-flip the Bake flag.";
+            var btnBakeNone = btnGrp.add("button", undefined, "Deselect All");
+            btnBakeNone.preferredSize = [110, 28];
+            btnBakeNone.helpTip = "Clear all row selection.";
+            var btnSpacer = btnGrp.add("statictext", undefined, "");
+            btnSpacer.alignment = ["fill", "center"];
             var btnCancel   = btnGrp.add("button", undefined, "Cancel \u2014 I'll fix first");
             var btnContinue = btnGrp.add("button", undefined, "Continue \u2014 reversed is intentional");
             btnCancel.preferredSize   = [180, 28];
-            btnContinue.preferredSize = [240, 28];
+            btnContinue.preferredSize = [260, 28];
+
+            function refreshContinueLabel() {
+                var bakeCount = 0;
+                for (var rc = 0; rc < reversed.length; rc++) if (reversed[rc].bake) bakeCount++;
+                var convCount = reversed.length - bakeCount;
+                btnContinue.text = "Continue: " + bakeCount + " bake, " + convCount + " convert";
+            }
+            refreshContinueLabel();
+
+            function toggleBakeSelection() {
+                var sel = lb.selection;
+                if (!sel) return;
+                var selArr = (sel.length !== undefined) ? sel : [sel];
+                var selIndices = [];
+                for (var si = 0; si < selArr.length; si++) selIndices.push(selArr[si].index);
+                for (var sj = 0; sj < selIndices.length; sj++) {
+                    reversed[selIndices[sj]].bake = !reversed[selIndices[sj]].bake;
+                    lb.items[selIndices[sj]].subItems[2].text = reversed[selIndices[sj]].bake ? "✓" : "";
+                }
+                // ScriptUI doesn't repaint subItem text while items are
+                // selected, so clear and restore selection.
+                lb.selection = null;
+                for (var sk = 0; sk < selIndices.length; sk++) lb.items[selIndices[sk]].selected = true;
+                refreshContinueLabel();
+            }
+            function selectAllRows() {
+                for (var ai = 0; ai < lb.items.length; ai++) {
+                    lb.items[ai].selected = true;
+                }
+            }
+            function deselectAllRows() {
+                lb.selection = null;
+            }
+            btnToggleBake.onClick = toggleBakeSelection;
+            btnBakeAll.onClick    = selectAllRows;
+            btnBakeNone.onClick   = deselectAllRows;
+            try {
+                w.addEventListener("keydown", function(e) {
+                    if (e.keyName === "B") { e.preventDefault(); toggleBakeSelection(); }
+                });
+            } catch(eKD) {}
+
             btnCancel.onClick   = function () { w.close(2); };
             btnContinue.onClick = function () { w.close(1); };
 
-            return w.show() === 1;
+            var dlgRes = w.show();
+            if (dlgRes !== 1) return { proceed: false, bakeLayers: [] };
+            var bakeLayers = [];
+            for (var bi = 0; bi < reversed.length; bi++) {
+                if (reversed[bi].bake) bakeLayers.push(reversed[bi]);
+            }
+            return { proceed: true, bakeLayers: bakeLayers };
         }
 
         // Shared-source preflight. Fires BEFORE Confirm Shots when the
@@ -917,6 +1046,15 @@ NOTES
                         aName = aBaseName + "_" + aSuffix; aSuffix++;
                     }
 
+                    // Capture the original layer's label colour so we can
+                    // restore it on the new wrapper layer in mainComp.
+                    // AE's precompose otherwise hands the wrapper layer
+                    // a default label that doesn't match anything the
+                    // user might have set up (e.g. the "Color Time-
+                    // Reverse Layers" pass colours reversed clips blue).
+                    var aOriginalLabel = 0;
+                    try { aOriginalLabel = comp.layer(aInfo.index).label; } catch (eLbl0) {}
+
                     var aNewComp = comp.layers.precompose([aInfo.index], aName, true);
                     aNewComp.duration = comp.duration;
 
@@ -935,6 +1073,7 @@ NOTES
                     if (aPrecompLayer) {
                         aPrecompLayer.inPoint  = aInfo.inPoint;
                         aPrecompLayer.outPoint = aInfo.outPoint;
+                        try { aPrecompLayer.label = aOriginalLabel; } catch (eLbl1) {}
                         newPrecompLayers.push(aPrecompLayer);
                     }
                 }
@@ -957,6 +1096,30 @@ NOTES
 
             app.endUndoGroup();
             return true;
+        }
+
+        // Recursive: does this comp (or any nested precomp under it) have
+        // a layer whose source is `srcItem`? Used by the bake-placement
+        // step to find which shot owns a given baked source. `visited` is
+        // a {compName: true} cycle-guard.
+        function compTreeContainsSource(comp, srcItem, visited) {
+            if (!comp || !(comp instanceof CompItem)) return false;
+            visited = visited || {};
+            var key = "c" + (comp.id || comp.name);
+            if (visited[key]) return false;
+            visited[key] = true;
+            for (var li = 1; li <= comp.numLayers; li++) {
+                var L;
+                try { L = comp.layer(li); } catch (eL1) { continue; }
+                if (!L) continue;
+                try {
+                    if (L.source === srcItem) return true;
+                    if (L.source instanceof CompItem) {
+                        if (compTreeContainsSource(L.source, srcItem, visited)) return true;
+                    }
+                } catch (eL2) {}
+            }
+            return false;
         }
 
         function getShotBin(parentBin, shotName) {
@@ -1409,7 +1572,7 @@ NOTES
                 var l = comp.layer(li);
                 if (!isScanRelevantLayer(l)) continue;
                 var fx = describeTimeEffect(l);
-                if (fx) results.push({ layerName: l.name, path: path.join(" \u203A "), label: fx.label, reversed: fx.reversed, topLevel: false });
+                if (fx) results.push({ layerName: l.name, path: path.join(" \u203A "), label: fx.label, reversed: fx.reversed, topLevel: false, layer: l });
                 if (l.source instanceof CompItem) {
                     walkPrecompForEffects(l.source, path.concat([l.source.name]), results);
                 }
@@ -1422,7 +1585,7 @@ NOTES
         function scanSelLayerForEffects(tl) {
             var results = [];
             var topFx = describeTimeEffect(tl);
-            if (topFx) results.push({ layerName: tl.name, path: mainComp.name, label: topFx.label, reversed: topFx.reversed, topLevel: true });
+            if (topFx) results.push({ layerName: tl.name, path: mainComp.name, label: topFx.label, reversed: topFx.reversed, topLevel: true, layer: tl });
             if (tl.source instanceof CompItem) {
                 walkPrecompForEffects(tl.source, [mainComp.name, tl.source.name], results);
             }
@@ -1583,6 +1746,8 @@ NOTES
             }
             return n;
         }
+
+
         // Scan for reversals FIRST so the warning dialog comes up BEFORE any
         // DOM mutation. Cancel on this dialog must leave the project
         // unmodified — earlier versions converted negative-stretch to
@@ -1608,15 +1773,21 @@ NOTES
         // after the user commits on the Confirm Shots preflight. Hitting
         // "Continue" here only acknowledges the warning; cancelling on
         // EITHER this dialog OR Confirm Shots leaves the project pristine.
+        //
+        // Layers picked for "render as new plate" in the warning dialog
+        // are stashed on `revBakeLayers` and consumed by the post-Save-As
+        // bake phase below.
+        var revBakeLayers = [];
         if (reversedList.length > 0) {
             // Close palette before modal so macOS hands focus to the dialog.
             progress.close();
-            var revOk = confirmReversedClips(reversedList);
+            var revRes = confirmReversedClips(reversedList);
             progress = makeProgressPanel();
-            if (!revOk) {
+            if (!revRes || !revRes.proceed) {
                 reportCancellation("Cancelled at the reversed-clips warning \u2014 no roundtrip performed.");
                 return;
             }
+            revBakeLayers = revRes.bakeLayers || [];
             progress.update("Reversed clips acknowledged, preparing preflight\u2026", "", 4);
         }
 
@@ -2050,7 +2221,7 @@ NOTES
             expandedLayers[cfi].overscan = false;
         }
 
-        // Each row: { cols:[shot, frames, res, notice, source, os], layerIdx }
+        // Each row: { cols:[shot, frames, res, notice, source, os, bake], layerIdx }
         // layerIdx=-1 for skip rows (shot comp already exists).
         var confRows = [];
         var confTotalFrames = 0;
@@ -2059,6 +2230,16 @@ NOTES
         var confResMaxLen    = 0;
         var confNoticeMaxLen = 0;
         var confPathMaxLen   = 0;
+        var confBakeMaxLen   = 0;
+
+        // Resolves whether a given AVLayer is in the user's bake-marked
+        // set. Linear scan — at most a handful of entries in practice.
+        function isLayerBakeMarked(l) {
+            for (var bki = 0; bki < revBakeLayers.length; bki++) {
+                if (revBakeLayers[bki].layer === l) return true;
+            }
+            return false;
+        }
 
         progress.update("Preparing Confirm Shots dialog\u2026", "0 of " + expandedLayers.length, 12);
         try {
@@ -2072,7 +2253,7 @@ NOTES
 
             // Already exists?
             if (!!confExisting[cfName + "_comp"]) {
-                confRows.push({ cols: [cfName, "", "", "\u2014 skip", "already exists", ""], layerIdx: -1 });
+                confRows.push({ cols: [cfName, "", "", "\u2014 skip", "already exists", "", ""], layerIdx: -1 });
                 if (cfName.length > confNameMaxLen) confNameMaxLen = cfName.length;
                 continue;
             }
@@ -2133,13 +2314,30 @@ NOTES
             }
             var cfNotice = cfNoticeParts.join("  ");
 
+            // Bake column: summarize the user's per-layer Bake choices from
+            // the reversal warning dialog for this shot. Empty when the
+            // shot has no reversed clips. "N/M" where N = baked count and
+            // M = total reversed in this shot's tree.
+            var cfBakeBaked = 0, cfBakeTotal = 0;
+            for (var cfb = 0; cfb < cfEffects.length; cfb++) {
+                if (!cfEffects[cfb].reversed) continue;
+                cfBakeTotal++;
+                if (isLayerBakeMarked(cfEffects[cfb].layer)) cfBakeBaked++;
+            }
+            var cfBake;
+            if (cfBakeTotal === 0)                      cfBake = "";
+            else if (cfBakeBaked === cfBakeTotal)       cfBake = "\u2713 " + cfBakeBaked + "/" + cfBakeTotal;
+            else if (cfBakeBaked === 0)                 cfBake = "\u2014 " + cfBakeBaked + "/" + cfBakeTotal;
+            else                                         cfBake = cfBakeBaked + "/" + cfBakeTotal;
+
             var cfOsMark = cfItem.overscan ? "\u2715" : "";
-            confRows.push({ cols: [cfName, cfFrames, cfRes, cfNotice, cfPath, cfOsMark], layerIdx: cfi });
+            confRows.push({ cols: [cfName, cfFrames, cfRes, cfNotice, cfPath, cfOsMark, cfBake], layerIdx: cfi });
             if (cfName.length   > confNameMaxLen)   confNameMaxLen   = cfName.length;
             if (cfFrames.length > confFramesMaxLen) confFramesMaxLen = cfFrames.length;
             if (cfRes.length    > confResMaxLen)    confResMaxLen    = cfRes.length;
             if (cfNotice.length > confNoticeMaxLen) confNoticeMaxLen = cfNotice.length;
             if (cfPath.length   > confPathMaxLen)   confPathMaxLen   = cfPath.length;
+            if (cfBake.length   > confBakeMaxLen)   confBakeMaxLen   = cfBake.length;
         }
         } catch (eConfRows) {
             try { progress.close(); } catch(eCl){}
@@ -2157,9 +2355,10 @@ NOTES
         var confColRes    = Math.max(confResMaxLen    * 8 + 16, 90);
         var confColNotice = Math.max(confNoticeMaxLen * 7 + 16, 80);
         var confColOs     = 120; // width fits "Overscan Toggle" header
+        var confColBake   = Math.max(confBakeMaxLen   * 8 + 24, 70); // "Bake" column
         var confColSource = Math.max(confPathMaxLen   * 8 + 24, 260);
         // Source column gets whatever space remains after the fixed columns.
-        var confFixedW = confColShot + confColFrames + confColRes + confColNotice + confColOs + 60;
+        var confFixedW = confColShot + confColFrames + confColRes + confColNotice + confColOs + confColBake + 60;
         confColSource  = Math.min(confColSource, maxDlgW - confFixedW);
         confColSource  = Math.max(confColSource, 260);
         var confDlgW   = Math.min(confFixedW + confColSource, maxDlgW);
@@ -2211,7 +2410,7 @@ NOTES
         confSortRow.orientation = "row"; confSortRow.alignChildren = ["left", "center"];
         confSortRow.spacing = 4;
         confSortRow.add("statictext", undefined, "Sort:");
-        var CONF_LABELS = ["Shot", "Frames", "Res", "Notice", "Source", "Overscan"];
+        var CONF_LABELS = ["Shot", "Frames", "Res", "Notice", "Source", "Overscan", "Bake"];
         var confBtns = [];
         for (var cs = 0; cs < CONF_LABELS.length; cs++) {
             var cb = confSortRow.add("button", undefined, CONF_LABELS[cs]);
@@ -2236,10 +2435,10 @@ NOTES
 
         var confLB = shotsPnl.add("listbox", undefined, [], {
             multiselect: true,
-            numberOfColumns: 6,
+            numberOfColumns: 7,
             showHeaders: true,
-            columnTitles: ["Shot", "Frames", "Res", "Notice", "Source", "Overscan Toggle"],
-            columnWidths: [confColShot, confColFrames, confColRes, confColNotice, confColSource, confColOs]
+            columnTitles: ["Shot", "Frames", "Res", "Notice", "Source", "Overscan Toggle", "Bake"],
+            columnWidths: [confColShot, confColFrames, confColRes, confColNotice, confColSource, confColOs, confColBake]
         });
         var confLBH = Math.max(confRows.length * 22 + 40, 200);
         confLBH = Math.min(confLBH, 600);
@@ -2253,6 +2452,7 @@ NOTES
                 cfRow.subItems[2].text = confRows[cfi].cols[3]; // notice
                 cfRow.subItems[3].text = confRows[cfi].cols[4]; // source
                 cfRow.subItems[4].text = confRows[cfi].cols[5]; // os
+                cfRow.subItems[5].text = confRows[cfi].cols[6]; // bake
             }
         }
         confRepopulate();
@@ -2355,6 +2555,36 @@ NOTES
             15
         );
 
+        // Resolve the Roundtrip root folder up front for the post-render
+        // bake step. The main loop further down re-resolves it as
+        // `fsShots` against the same UI field; both yield the same path.
+        var bakeShotsPathText = etShotsFolder.text;
+        var bakeAepFolder = proj.file.parent;
+        var fsBakeRoot = /^(\/|[A-Za-z]:)/.test(bakeShotsPathText)
+                       ? new Folder(bakeShotsPathText)
+                       : new Folder(bakeAepFolder.fsName + "/" + bakeShotsPathText);
+        if (!fsBakeRoot.exists) fsBakeRoot.create();
+        if (!fsBakeRoot.exists) { alert("Could not create roundtrip folder:\n" + fsBakeRoot.fsName); progress.close(); return; }
+
+        // Capture the source FootageItem of every reversed layer the
+        // user marked "Bake" in the warning dialog, RIGHT NOW — before
+        // conversion + auto-precompose may invalidate the layer
+        // references. The post-render bake step (inside the import loop
+        // below) walks each shot's `_comp` tree for any of these sources
+        // and, when found, duplicates the auto-rendered plate inside
+        // `_stack`, applies stretch=-100, renders the stack out as a
+        // reversed variant, and places the result back into the stack.
+        var bakeSources = [];
+        if (revBakeLayers && revBakeLayers.length > 0) {
+            for (var bli = 0; bli < revBakeLayers.length; bli++) {
+                var bl = revBakeLayers[bli].layer;
+                if (!bl) continue;
+                try {
+                    if (bl.source) bakeSources.push(bl.source);
+                } catch (eBSC) {}
+            }
+        }
+
         // Now do the deferred DOM mutations: rewrite stretch→remap and
         // auto-precompose time-remapped layers. Running these earlier
         // (e.g. right after the reversal warning's Continue button) meant
@@ -2376,6 +2606,63 @@ NOTES
         var postConvertSel = applyTimeEffectConversions();
         if (postConvertSel === null) { progress.close(); return; }
         selLayers = postConvertSel;
+
+        // Flip baked layers' time-remap from descending to ascending in
+        // mainComp.
+        //
+        // applyTimeEffectConversions just rewrote any negative-stretch
+        // reversals into descending time-remap keys so the rest of the
+        // pipeline can handle them. For layers the user marked Bake the
+        // reversal is captured in the separate `_reversed.mov` rendered
+        // into _stack later — having mainComp ALSO play the source
+        // backward via remap would double-direction the edit. So for
+        // each baked layer we keep the keys and their times intact (so
+        // the cut + handle structure is preserved) but mirror the VALUES
+        // across the cut centre, which turns descending into ascending →
+        // forward playback over the same source range.
+        if (bakeSources && bakeSources.length > 0) {
+            (function reverseBakedLayersInTree(comp, visited) {
+                if (!comp || !(comp instanceof CompItem)) return;
+                visited = visited || {};
+                var ck = "c" + (comp.id || comp.name);
+                if (visited[ck]) return;
+                visited[ck] = true;
+                for (var li = 1; li <= comp.numLayers; li++) {
+                    var L;
+                    try { L = comp.layer(li); } catch (eL1) { continue; }
+                    if (!L) continue;
+                    try {
+                        var srcMatch = false;
+                        for (var bsi = 0; bsi < bakeSources.length; bsi++) {
+                            if (L.source === bakeSources[bsi]) { srcMatch = true; break; }
+                        }
+                        if (srcMatch && L.timeRemapEnabled) {
+                            var tr = L.property("Time Remap");
+                            var nKeys = tr.numKeys;
+                            if (nKeys >= 2) {
+                                // Snapshot values, then write mirrored.
+                                var vals = [];
+                                for (var k = 1; k <= nKeys; k++) {
+                                    try { vals.push(tr.keyValue(k)); }
+                                    catch (eKV) { vals.push(0); }
+                                }
+                                for (var w = 1; w <= nKeys; w++) {
+                                    try { tr.setValueAtKey(w, vals[nKeys - w]); } catch (eSV) {}
+                                }
+                                // Force linear so playback is constant-
+                                // speed forward, matching the bake.
+                                for (var iw = 1; iw <= nKeys; iw++) {
+                                    try { tr.setInterpolationTypeAtKey(iw, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.LINEAR); } catch (eIK) {}
+                                }
+                            }
+                        }
+                        if (L.source instanceof CompItem) {
+                            reverseBakedLayersInTree(L.source, visited);
+                        }
+                    } catch (eL2) {}
+                }
+            })(mainComp);
+        }
 
         // Rebuild expandedLayers from the post-conversion selection. The
         // inner references (found.footageLayer, found.footageComp) on the
@@ -2674,22 +2961,28 @@ NOTES
                     var needsWrap = layer.timeRemapEnabled ||
                                     Math.abs(layer.stretch - 100) > 0.01;
                     if (needsWrap) {
-                        // Capture original timing before precompose invalidates the ref —
-                        // AE's native precompose does not reliably preserve inPoint/outPoint
-                        // on the new mainComp layer, so we restore them ourselves.
+                        // Capture original timing AND label colour before
+                        // precompose invalidates the ref — AE's native
+                        // precompose does not reliably preserve in/out OR
+                        // the layer's label on the new mainComp wrapper,
+                        // so we restore them ourselves.
                         var origInPointPC  = layer.inPoint;
                         var origOutPointPC = layer.outPoint;
+                        var origLabelPC    = 0;
+                        try { origLabelPC = layer.label; } catch (eLblPC0) {}
                         var layerIdx = layer.index; // read before precompose invalidates the ref
                         try { mainComp.layers.precompose([layerIdx], shotName + "_container" + osSuffix, true); } catch(ePC) {}
                         // Always re-fetch outside the try — whether precompose succeeded or failed,
                         // mainComp.layer(idx) is valid: it's the wrapper on success, the original on failure.
                         layer = mainComp.layer(layerIdx);
-                        // Restore original in/out so the edit's cut placement survives.
+                        // Restore original in/out + label so the edit's cut
+                        // placement and colour-coding survives.
                         try {
                             layer.startTime = 0;
                             layer.inPoint   = origInPointPC;
                             layer.outPoint  = origOutPointPC;
                         } catch (eTimingPC) {}
+                        try { layer.label = origLabelPC; } catch (eLblPC1) {}
                         // Single-shot precomp → shot bin. Multi-footage container's
                         // per-range bin is handled by the rename block below.
                         if (item.totalInPrecomp === 1) {
@@ -2916,6 +3209,8 @@ NOTES
                     // We restore the original in/out/startTime ourselves below.
                     var origInPoint   = layer.inPoint;
                     var origOutPoint  = layer.outPoint;
+                    var origLayerLabel = 0;
+                    try { origLayerLabel = layer.label; } catch (eLblDF0) {}
                     var layerIdx      = layer.index; // read before precompose invalidates the ref
                     var containerComp;
                     try {
@@ -2927,6 +3222,12 @@ NOTES
                     containerComp.displayStartTime = 0;
                     containerComp.parentFolder     = shotBin;
                     containerComp.label            = 8; // Blue — container (editorial)
+                    // Restore the original layer's label colour on the new
+                    // wrapper layer in mainComp. precompose hands it a
+                    // default label otherwise, which loses any colour-
+                    // coding the user set up upstream (e.g. via the
+                    // "Color Time-Reverse Layers" pass).
+                    try { mainComp.layer(layerIdx).label = origLayerLabel; } catch (eLblDF1) {}
 
                     // The original footage layer now lives inside containerComp with
                     // every attribute moved in by AE. Find it, then swap its source
@@ -3080,8 +3381,17 @@ NOTES
                     // the bottom of the stack so the warning is visible but
                     // doesn't clutter the time ruler.
                     try {
-                        var noticeNull = stackComp.layers.addNull(stackComp.duration);
-                        noticeNull.name       = "Managed by Gegenschuss Shot Roundtrip \u2014 do not modify";
+                        var noticeNullName    = "Managed by Gegenschuss Shot Roundtrip \u2014 do not modify";
+                        var noticeNull        = stackComp.layers.addNull(stackComp.duration);
+                        noticeNull.name       = noticeNullName;
+                        // Also rename the underlying source \u2014 AE shows the
+                        // SOURCE name in the timeline's Source Name column,
+                        // which keeps reading "Null 3" / "Null 7" / etc.
+                        // unless the source itself is renamed. This way
+                        // the warning text shows up regardless of which
+                        // column mode the user has on (Source Name or
+                        // Layer Name).
+                        try { if (noticeNull.source) noticeNull.source.name = noticeNullName; } catch (eNullSrc) {}
                         noticeNull.label      = 1;     // Red
                         noticeNull.guideLayer = true;  // never rendered
                         noticeNull.comment    = "Reimported variants (renders, grades) land here automatically. Any changes to this stack precomp will be overwritten by Shot Roundtrip.";
@@ -3138,7 +3448,7 @@ NOTES
                 var pPath = new File(fsShotPlate.fsName + "/" + shotName + "_plate.mov");
                 om.file = pPath;
 
-                renderItems.push({ n: shotName, p: pPath, c: shotComp, s: fullStart, w: osWidth, h: osHeight, cs: cutStart, cd: cutDuration, bin: shotBin, rq: rq, pc: stackComp });
+                renderItems.push({ n: shotName, p: pPath, c: shotComp, s: fullStart, w: osWidth, h: osHeight, cs: cutStart, cd: cutDuration, bin: shotBin, rq: rq, pc: stackComp, src: source });
 
                 var cutDurationFrames = Math.round(cutDuration * safeFPS);
                 nukeDataList.push({
@@ -3633,6 +3943,205 @@ NOTES
                         try { nL.property("Marker").setValueAtTime(cutInPP,  cutMarker("cut in"));  } catch (eM1) {}
                         try { nL.property("Marker").setValueAtTime(cutOutPP, cutMarker("cut out")); } catch (eM2) {}
 
+                        // Bake step (only when the user marked at least one
+                        // reversed layer in this shot's tree for Bake):
+                        // render `_stack` reversed through a small wrapper
+                        // comp and add the result as a top-layer variant in
+                        // `_stack`. The wrapper carries a descending time-
+                        // remap on `_stack` (AE's reliable reversal — bare
+                        // stretch=-100 needs paired startTime juggling that
+                        // setting it via script doesn't do, which is why
+                        // the previous attempt rendered blank).
+                        var bakeMatchedThisShot = false;
+                        if (bakeSources && bakeSources.length > 0) {
+                            for (var bki = 0; bki < bakeSources.length; bki++) {
+                                if (compTreeContainsSource(tComp, bakeSources[bki], {})) {
+                                    bakeMatchedThisShot = true; break;
+                                }
+                            }
+                        }
+                        if (bakeMatchedThisShot) {
+                            var bakedFolder = new Folder(fsBakeRoot.fsName + "/_baked");
+                            if (!bakedFolder.exists) bakedFolder.create();
+                            if (bakedFolder.exists) {
+                                // Always write to {shot}_reversed.mov, overwriting any
+                                // existing file from a previous run. Re-runs replace
+                                // the bake in place so the user has a single canonical
+                                // reversed file per shot rather than a pile of
+                                // _v01/_v02 variants.
+                                var revFile = new File(bakedFolder.fsName + "/" + ri.n + "_reversed.mov");
+                                try { if (revFile.exists) revFile.remove(); } catch (eRevRm) {}
+
+                                var stackFR = (tPrecomp.frameRate > 0) ? tPrecomp.frameRate : 25;
+                                var stackFrameDur = 1.0 / stackFR;
+                                // Pad the wrapper by 1 frame so the render's
+                                // [0, _stack.duration] sits safely inside.
+                                var wrapDur = tPrecomp.duration + stackFrameDur;
+                                var wrapComp = null;
+                                try {
+                                    wrapComp = proj.items.addComp(
+                                        "_bake_wrap_" + ri.n,
+                                        tPrecomp.width,
+                                        tPrecomp.height,
+                                        tPrecomp.pixelAspect,
+                                        wrapDur,
+                                        stackFR
+                                    );
+                                } catch (eWrapAdd) {}
+
+                                if (wrapComp) {
+                                    var wrapL = null;
+                                    try { wrapL = wrapComp.layers.add(tPrecomp); } catch (eWLA) {}
+                                    if (wrapL) {
+                                        try { wrapL.startTime = 0; } catch (eWST) {}
+                                        // Enable time-remap and FLIP the
+                                        // values on the auto-created keys
+                                        // (AE creates 2 keys at the layer's
+                                        // start/end with forward source-
+                                        // time values). Reversing the
+                                        // values gives a descending remap;
+                                        // keys stay at the same times so
+                                        // we don't have to fight AE's
+                                        // boundary handling. setValueAtKey
+                                        // is more reliable than removing +
+                                        // re-adding.
+                                        try {
+                                            wrapL.timeRemapEnabled = true;
+                                            var wrapTR = wrapL.property("Time Remap");
+                                            if (wrapTR.numKeys >= 2) {
+                                                try { wrapTR.setValueAtKey(1, tPrecomp.duration); } catch (eWK1) {}
+                                                try { wrapTR.setValueAtKey(2, 0);                  } catch (eWK2) {}
+                                                try { wrapTR.setInterpolationTypeAtKey(1, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.LINEAR); } catch (eWI1) {}
+                                                try { wrapTR.setInterpolationTypeAtKey(2, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.LINEAR); } catch (eWI2) {}
+                                            }
+                                        } catch (eWRT) {}
+
+                                        // Render the wrapper.
+                                        var revRq = null;
+                                        var revOk = false;
+                                        try {
+                                            revRq = proj.renderQueue.items.add(wrapComp);
+                                            revRq.timeSpanStart    = 0;
+                                            revRq.timeSpanDuration = Math.max(stackFrameDur, tPrecomp.duration);
+                                            var revOM = revRq.outputModule(1);
+                                            var revFoundT = false;
+                                            for (var revT = 0; revT < revOM.templates.length; revT++) {
+                                                if (revOM.templates[revT] === omTemplate) revFoundT = true;
+                                            }
+                                            if (revFoundT) revOM.applyTemplate(omTemplate);
+                                            revOM.file = revFile;
+                                            for (var qqi = 1; qqi <= proj.renderQueue.numItems; qqi++) {
+                                                var qqit = proj.renderQueue.item(qqi);
+                                                if (qqit !== revRq && qqit.status === RQItemStatus.QUEUED) {
+                                                    try { qqit.render = false; } catch (eRRf) {}
+                                                }
+                                            }
+                                            try { progress.close(); } catch (eRP1) {}
+                                            try {
+                                                proj.renderQueue.render();
+                                                revOk = waitForFile(revFile, 20);
+                                            } catch (eRevR) { revOk = false; }
+                                            try { progress = makeProgressPanel(); } catch (eRP2) {}
+                                        } catch (eRevSetup) { revOk = false; }
+                                        try { if (revRq) revRq.remove(); } catch (eRRm) {}
+
+                                        if (revOk) {
+                                            var revFootage = null;
+                                            try { revFootage = proj.importFile(new ImportOptions(revFile)); } catch (eRIm) {}
+                                            if (revFootage) {
+                                                try { revFootage.parentFolder = getBinFolder("_baked"); } catch (eBakedBin) {}
+                                                try {
+                                                    var revL = tPrecomp.layers.add(revFootage);
+                                                    revL.startTime = 0;
+                                                    try { revL.position.setValue([ri.w / 2, ri.h / 2]); } catch (eBPos) {}
+                                                    revL.label = 8;
+                                                    try { revL.comment = "Reversed variant of " + ri.n + "_plate (rendered from _stack via wrapper time-remap)."; } catch (eRComm) {}
+                                                    try { revL.property("Marker").setValueAtTime(cutInPP,  cutMarker("cut in"));  } catch (eRBM1) {}
+                                                    try { revL.property("Marker").setValueAtTime(cutOutPP, cutMarker("cut out")); } catch (eRBM2) {}
+                                                } catch (eRevAdd) {}
+                                            }
+                                        }
+                                    }
+                                    try { wrapComp.remove(); } catch (eWRm) {}
+                                }
+                            }
+                        }
+
+                        // Always add the shot's ORIGINAL forward source
+                        // (raw FootageItem) into _stack as a guide layer
+                        // for visual checking — both with and without the
+                        // Bake option. Aligned so source-time ri.s
+                        // (= fullStart, the start of the rendered range)
+                        // lands at _stack local time 0 — same axis as
+                        // every other layer in the stack. Guide layers
+                        // never contribute to any render. Moved BELOW
+                        // every variant (just above the "Managed by
+                        // Gegenschuss…" notice null) at the end of this
+                        // block.
+                        var origGuide = null;
+                        if (ri.src) {
+                            try {
+                                origGuide = tPrecomp.layers.add(ri.src);
+                                try { origGuide.startTime = -ri.s; } catch (eOGS) {}
+                                try {
+                                    origGuide.inPoint  = 0;
+                                    origGuide.outPoint = tPrecomp.duration;
+                                } catch (eOGIO) {}
+                                try { origGuide.position.setValue([ri.w / 2, ri.h / 2]); } catch (eOGP) {}
+                                try { origGuide.guideLayer = true; } catch (eOGG) {}
+                                try { origGuide.label = 12; } catch (eOGL) {} // Brown — original guide
+                                try { origGuide.comment = "Original forward source — guide layer (does not render)."; } catch (eOGC) {}
+                                try { origGuide.property("Marker").setValueAtTime(cutInPP,  cutMarker("cut in"));  } catch (eOGM1) {}
+                                try { origGuide.property("Marker").setValueAtTime(cutOutPP, cutMarker("cut out")); } catch (eOGM2) {}
+                            } catch (eOGAdd) {}
+                        }
+
+                        // Layer order in _stack: variants on top (most
+                        // recent first), then forward auto-plate, then
+                        // the original-source guide layer, then the
+                        // "Managed by…" notice null at the very bottom.
+                        // Find the notice null by name (its ref isn't in
+                        // scope here) and re-anchor.
+                        var noticeNull = null;
+                        for (var nni = 1; nni <= tPrecomp.numLayers; nni++) {
+                            try {
+                                if (tPrecomp.layer(nni).name.indexOf("Managed by Gegenschuss") === 0) {
+                                    noticeNull = tPrecomp.layer(nni); break;
+                                }
+                            } catch (eNN) {}
+                        }
+                        if (noticeNull) {
+                            try { noticeNull.locked = false; } catch (eNNu1) {}
+                            try { noticeNull.moveToEnd(); } catch (eNNm) {}
+                            try { noticeNull.locked = true; } catch (eNNu2) {}
+                        }
+                        if (origGuide) {
+                            try {
+                                if (noticeNull) origGuide.moveBefore(noticeNull);
+                                else            origGuide.moveToEnd();
+                            } catch (eOGMv) {}
+                        }
+
+                        // Topmost-only audio in _stack. Reimported variants
+                        // (auto-plate, reversed bake, plate variants from
+                        // Import Returns later) all carry the same audio
+                        // track; without this we'd render the same audio
+                        // 2-3× layered. Walk top-down and enable audio on
+                        // the first audio-bearing non-guide AVLayer only;
+                        // mute every other audio-bearing layer.
+                        try {
+                            var topAudioFound = false;
+                            for (var ai = 1; ai <= tPrecomp.numLayers; ai++) {
+                                var aL;
+                                try { aL = tPrecomp.layer(ai); } catch (eAL0) { continue; }
+                                if (!aL || !(aL instanceof AVLayer)) continue;
+                                if (!aL.hasAudio) continue;
+                                var enableAudio = (!aL.guideLayer && !topAudioFound);
+                                try { aL.audioEnabled = enableAudio; } catch (eAE) {}
+                                if (enableAudio) topAudioFound = true;
+                            }
+                        } catch (eAudPass) {}
+
                         // In _comp: disable every layer except the plate
                         // precomp itself and guide layers. Finds the precomp's
                         // outer layer by source identity to avoid disabling it.
@@ -3756,6 +4265,77 @@ NOTES
                         try { dlLayer.inPoint = origIn; dlLayer.outPoint = origOut; } catch(eRb) {}
                     }
                 }
+            }
+
+            // ── Extend handles on time-remapped inner container layers ─
+            // The direct-footage container path explicitly extends its
+            // inner layer to cut + handles. The time-remapped path
+            // (where autoPrecomposeTrimmed wrapped the layer earlier)
+            // does not — the inner layer keeps its original cut-only
+            // in/out, so the handle frames render BLACK in both the
+            // _container preview in mainComp AND in the dynamicLink
+            // wrapper. convertStretchReversalToRemap already placed
+            // keyframes at the handle boundaries (preTime/postTime), so
+            // we just need to pull the layer's inPoint/outPoint out to
+            // span those outer keys.
+            //
+            // Runs LAST so dynamicLink built off the un-extended layer's
+            // math stays valid; the wrapper then naturally inherits the
+            // newly-visible handle content from `_container`.
+            //
+            // Only mutates layers with timeRemapEnabled AND at least two
+            // keyframes — a no-op for default (non-time-remapped) inner
+            // layers, which the existing direct-footage extension
+            // already handles.
+            try {
+                progress.update("Extending handles on time-remapped layers…", "", 95);
+                var dlContSeen = 0, dlContExtended = 0;
+                for (var pii = 1; pii <= proj.numItems; pii++) {
+                    var pIt = null;
+                    try { pIt = proj.item(pii); } catch (ePI1) { continue; }
+                    if (!pIt || !(pIt instanceof CompItem)) continue;
+                    if (!/_container(?:_OS)?$/.test(pIt.name)) continue;
+                    dlContSeen++;
+                    for (var cli = 1; cli <= pIt.numLayers; cli++) {
+                        var cL = null;
+                        try { cL = pIt.layer(cli); } catch (eCL1) { continue; }
+                        if (!cL) continue;
+                        if (!cL.timeRemapEnabled) continue;
+                        var trX = null;
+                        try { trX = cL.property("Time Remap"); } catch (eTRX) {}
+                        if (!trX || trX.numKeys < 2) continue;
+                        var firstKey = trX.numKeys, lastKey = 1;
+                        // Outermost keyframe times in LAYER time. Walk the
+                        // keys to find min/max — they don't always come
+                        // back in time order from numKeys iteration.
+                        var minT = trX.keyTime(1), maxT = trX.keyTime(1);
+                        for (var kk = 2; kk <= trX.numKeys; kk++) {
+                            var kt = trX.keyTime(kk);
+                            if (kt < minT) minT = kt;
+                            if (kt > maxT) maxT = kt;
+                        }
+                        // Snap to comp duration so we never extend past
+                        // the end of the host comp (AE clamps anyway, but
+                        // explicit avoids any edge).
+                        var compDurX = pIt.duration;
+                        if (minT < 0)        minT = 0;
+                        if (maxT > compDurX) maxT = compDurX;
+                        if (maxT <= minT)    continue;
+                        // Only widen — never contract. If the existing
+                        // in/out already spans the keys (e.g. someone
+                        // ran this twice, or a future direct-footage
+                        // path does this earlier), leave it alone.
+                        var widened = false;
+                        try {
+                            if (cL.inPoint > minT)  { cL.inPoint  = minT; widened = true; }
+                            if (cL.outPoint < maxT) { cL.outPoint = maxT; widened = true; }
+                        } catch (eIO) {}
+                        if (widened) dlContExtended++;
+                    }
+                }
+                progress.update("Extended handles on " + dlContExtended + " of " + dlContSeen + " container layer(s)", "", 96);
+            } catch (eExtH) {
+                // Non-fatal — handle extension is a polish step.
             }
 
             if (nukeDataList.length > 0) {

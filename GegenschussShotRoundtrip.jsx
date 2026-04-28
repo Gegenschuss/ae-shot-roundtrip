@@ -148,7 +148,7 @@
         brandCol.orientation = "column";
         brandCol.alignment = ["left", "center"];
         brandCol.spacing = 2;
-        var buildDate = brandCol.add("statictext", undefined, "20260427");
+        var buildDate = brandCol.add("statictext", undefined, "20260428");
         // NOTE to editor: keep this date in sync with ship day (YYYYMMDD).
         buildDate.graphics.font = ScriptUI.newFont("Helvetica", "REGULAR", 11);
         buildDate.graphics.foregroundColor = buildDate.graphics.newPen(buildDate.graphics.PenType.SOLID_COLOR, [0.55, 0.55, 0.55, 1], 1);
