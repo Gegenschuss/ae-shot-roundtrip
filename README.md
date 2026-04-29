@@ -525,13 +525,13 @@ Two sibling panels ship as their own repos. Install whichever you need
 alongside this one — neither is required for the core roundtrip flow,
 both stand on their own.
 
-- **[`ae-syntheyes-roundtrip`](https://github.com/Gegenschuss/ae-syntheyes-roundtrip)** —
+- **[`aftereffects-syntheyes-roundtrip`](https://github.com/Gegenschuss/aftereffects-syntheyes-roundtrip)** —
   SynthEyes ↔ AE bridge. Two batch helpers: **Convert JSX → AEP**
   (run SynthEyes-exported `.jsx` files and save each as an `.aep`
   project — pick **New Project** in SynthEyes, not Run) and
   **Import AEP to AE** (import the resulting `.aep` files and wire
   each into its matching shot folder).
-- **[`ae-little-toolbox`](https://github.com/Gegenschuss/ae-little-toolbox)** —
+- **[`aftereffects-little-toolbox`](https://github.com/Gegenschuss/aftereffects-little-toolbox)** —
   general-purpose AE helpers: precompose variants, language switching,
   color-effect auditing, **Reverse Stretch → Remap**, **Precompose
   Trimmed**, **Mute All Audio**, **Precomp to Guide Preview**, and so
