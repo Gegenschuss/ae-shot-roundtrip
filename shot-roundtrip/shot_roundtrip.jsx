@@ -701,8 +701,21 @@ NOTES
             // so every detected reversed clip bakes unless the user opts
             // out (the bake is the safe choice — keeps a clean forward
             // mainComp + a separate reversed plate for diff-key A/B).
+            //
+            // mustBake is locked-on for layers whose remap is "complex" —
+            // extra keys, hold frames, eased segments, or non-default key
+            // positions / values on top of the reversal.  The convert
+            // path can't safely compose another reversal with a custom
+            // remap curve, so bake (which captures the visible output
+            // verbatim) is the only correct route.  toggleBakeSelection
+            // skips these rows so the user can't accidentally untick them.
             for (var bf = 0; bf < reversed.length; bf++) {
-                if (typeof reversed[bf].bake !== "boolean") reversed[bf].bake = true;
+                if (reversed[bf].remapKind === "complex-reverse") {
+                    reversed[bf].mustBake = true;
+                    reversed[bf].bake     = true;
+                } else if (typeof reversed[bf].bake !== "boolean") {
+                    reversed[bf].bake = true;
+                }
             }
 
             // Sort controls — ScriptUI listbox headers aren't clickable,
@@ -753,13 +766,17 @@ NOTES
                 columnTitles: ["Layer", "Path", "Effect", "Bake"],
                 columnWidths: [240, 460, 200, 60]
             });
+            function bakeCellText(entry) {
+                if (entry.mustBake) return "✓ 🔒";
+                return entry.bake ? "✓" : "";
+            }
             function revRepopulate() {
                 try { lb.removeAll(); } catch (eRA) {}
                 for (var k = 0; k < reversed.length; k++) {
                     var row = lb.add("item", reversed[k].layerName);
                     row.subItems[0].text = reversed[k].path;
                     row.subItems[1].text = reversed[k].label;
-                    row.subItems[2].text = reversed[k].bake ? "✓" : "";
+                    row.subItems[2].text = bakeCellText(reversed[k]);
                 }
             }
             revSortList();
@@ -773,9 +790,9 @@ NOTES
             warn.preferredSize = [1000, 60];
 
             var bakeHint = w.add("statictext", undefined,
-                "Tip: select one or more rows and click Toggle Bake to render those clips out as new forward-playing plates BEFORE the roundtrip. The layer's source is then swapped to the baked file and time effects are cleared, so re-runs see a clean forward plate.",
+                "Tip: select one or more rows and click Toggle Bake to render those clips out as new forward-playing plates BEFORE the roundtrip. The layer's source is then swapped to the baked file and time effects are cleared, so re-runs see a clean forward plate.\n      ⚠  “ ✓ 🔒” = layer has custom time-remap keys on top of the reversal. Bake is the only safe path here; the Convert option can’t cleanly compose another reversal with a custom remap curve, so the toggle is locked on.",
                 { multiline: true });
-            bakeHint.preferredSize = [1000, 50];
+            bakeHint.preferredSize = [1000, 80];
 
             var btnGrp = w.add("group");
             btnGrp.alignment = ["fill", "bottom"];
@@ -810,9 +827,14 @@ NOTES
                 var selArr = (sel.length !== undefined) ? sel : [sel];
                 var selIndices = [];
                 for (var si = 0; si < selArr.length; si++) selIndices.push(selArr[si].index);
+                // Skip rows whose remap is "complex-reverse" — bake is
+                // forced on those, the toggle is a no-op.  Other rows
+                // flip as before.
                 for (var sj = 0; sj < selIndices.length; sj++) {
-                    reversed[selIndices[sj]].bake = !reversed[selIndices[sj]].bake;
-                    lb.items[selIndices[sj]].subItems[2].text = reversed[selIndices[sj]].bake ? "✓" : "";
+                    var ent = reversed[selIndices[sj]];
+                    if (ent.mustBake) continue;
+                    ent.bake = !ent.bake;
+                    lb.items[selIndices[sj]].subItems[2].text = bakeCellText(ent);
                 }
                 // ScriptUI doesn't repaint subItem text while items are
                 // selected, so clear and restore selection.
@@ -1057,6 +1079,35 @@ NOTES
 
                     var aNewComp = comp.layers.precompose([aInfo.index], aName, true);
                     aNewComp.duration = comp.duration;
+
+                    // Normalise the WRAPPED inner layer's in/out.  AE's
+                    // precompose() will silently extend outPoint to include
+                    // the last time-remap keyframe, even if that key sits
+                    // far past the original cut.  For complex / partially-
+                    // reversed remaps this leaves the inner layer running
+                    // tens of seconds long, throwing the bake render and
+                    // every downstream marker / handle calculation off.
+                    // Force the inner layer back to the original cut span
+                    // (in/out length).  Keys past the new outPoint stay on
+                    // the property but no longer drive playback.
+                    try {
+                        var aInnerL = null;
+                        for (var ai = 1; ai <= aNewComp.numLayers; ai++) {
+                            try { aInnerL = aNewComp.layer(ai); } catch (eAI) {}
+                            if (aInnerL) break;
+                        }
+                        if (aInnerL) {
+                            var aCutDur = aInfo.outPoint - aInfo.inPoint;
+                            if (aCutDur > 0) {
+                                // Match the inner layer span to the cut.
+                                // Keep its inPoint at whatever AE assigned
+                                // (typically 0 in the new precomp's frame),
+                                // just snap outPoint back from the AE-
+                                // extended value.
+                                aInnerL.outPoint = aInnerL.inPoint + aCutDur;
+                            }
+                        }
+                    } catch (eANorm) {}
 
                     // File the new precomp into /Shots/autoPrecomps/ instead of
                     // leaving it stranded at the project root alongside whatever
@@ -1546,14 +1597,82 @@ NOTES
                 return vOut < vIn;
             } catch (eTR) { return false; }
         }
+        // Classify the layer's time remap so the warning dialog can decide
+        // which path is safe.  AE's "Time-Reverse Layer" command produces
+        // exactly two keys at the layer's in/out with values (srcDur, 0) —
+        // that's the "simple-reverse" case where the existing mirror-and-
+        // bake path works cleanly.  Anything beyond that (extra keys, hold
+        // frames, eased segments, non-default key positions or values) is
+        // "complex" — composing it with another reversal is not safe and
+        // bake is the only path we can guarantee.
+        //
+        // Returns:
+        //   { kind: "none" | "simple-forward" | "simple-reverse"
+        //         | "complex-forward" | "complex-reverse",
+        //     reversed: bool }
+        function classifyRemap(layer) {
+            if (!layer.timeRemapEnabled) return { kind: "none", reversed: false };
+            var tr;
+            try { tr = layer.property("Time Remap"); }
+            catch (e) { return { kind: "none", reversed: false }; }
+            var srcDur = (layer.source && layer.source.duration) ? layer.source.duration : 0;
+            var inP    = layer.inPoint, outP = layer.outPoint;
+            var EPS_T  = 1e-3, EPS_V = 1e-4;
+
+            var vIn  = 0, vOut = 0;
+            try { vIn  = tr.valueAtTime(inP,  false); } catch (e) {}
+            try { vOut = tr.valueAtTime(outP, false); } catch (e) {}
+            var reversed = (vOut < vIn - EPS_V);
+
+            var nKeys = 0;
+            try { nKeys = tr.numKeys; } catch (e) {}
+
+            if (nKeys === 2 && srcDur > 0) {
+                var k1t = 0, k2t = 0, k1v = 0, k2v = 0;
+                try {
+                    k1t = tr.keyTime(1);  k2t = tr.keyTime(2);
+                    k1v = tr.keyValue(1); k2v = tr.keyValue(2);
+                } catch (e) {}
+                var atInOut =
+                    Math.abs(k1t - inP)  < EPS_T &&
+                    Math.abs(k2t - outP) < EPS_T;
+                var defAsc =
+                    atInOut &&
+                    Math.abs(k1v - 0)      < EPS_V &&
+                    Math.abs(k2v - srcDur) < EPS_V;
+                var defDes =
+                    atInOut &&
+                    Math.abs(k1v - srcDur) < EPS_V &&
+                    Math.abs(k2v - 0)      < EPS_V;
+                if (defAsc) return { kind: "simple-forward", reversed: false };
+                if (defDes) return { kind: "simple-reverse", reversed: true  };
+            }
+
+            return {
+                kind:     reversed ? "complex-reverse" : "complex-forward",
+                reversed: reversed
+            };
+        }
         function describeTimeEffect(layer) {
             if (layer.timeRemapEnabled) {
-                var trRev = isTimeRemapReversed(layer);
-                return { label: "[time remap" + (trRev ? ", reversed" : "") + "]", reversed: trRev };
+                var c = classifyRemap(layer);
+                var lbl;
+                switch (c.kind) {
+                    case "simple-reverse":  lbl = "[time remap, reversed]";            break;
+                    case "complex-reverse": lbl = "[time remap, reversed (complex)]";  break;
+                    case "complex-forward": lbl = "[time remap (complex)]";            break;
+                    case "simple-forward":  lbl = "[time remap]";                      break;
+                    default:                lbl = "[time remap]";
+                }
+                return { label: lbl, reversed: c.reversed, remapKind: c.kind };
             }
             if (Math.abs(layer.stretch - 100) > 0.01) {
                 var stRev = layer.stretch < 0;
-                return { label: "[time stretch " + Math.round(layer.stretch) + "%" + (stRev ? ", reversed" : "") + "]", reversed: stRev };
+                return {
+                    label:     "[time stretch " + Math.round(layer.stretch) + "%" + (stRev ? ", reversed" : "") + "]",
+                    reversed:  stRev,
+                    remapKind: "none"
+                };
             }
             return null;
         }
@@ -1572,7 +1691,15 @@ NOTES
                 var l = comp.layer(li);
                 if (!isScanRelevantLayer(l)) continue;
                 var fx = describeTimeEffect(l);
-                if (fx) results.push({ layerName: l.name, path: path.join(" \u203A "), label: fx.label, reversed: fx.reversed, topLevel: false, layer: l });
+                if (fx) results.push({
+                    layerName: l.name,
+                    path:      path.join(" \u203A "),
+                    label:     fx.label,
+                    reversed:  fx.reversed,
+                    remapKind: fx.remapKind || "none",
+                    topLevel:  false,
+                    layer:     l
+                });
                 if (l.source instanceof CompItem) {
                     walkPrecompForEffects(l.source, path.concat([l.source.name]), results);
                 }
@@ -1585,7 +1712,15 @@ NOTES
         function scanSelLayerForEffects(tl) {
             var results = [];
             var topFx = describeTimeEffect(tl);
-            if (topFx) results.push({ layerName: tl.name, path: mainComp.name, label: topFx.label, reversed: topFx.reversed, topLevel: true, layer: tl });
+            if (topFx) results.push({
+                layerName: tl.name,
+                path:      mainComp.name,
+                label:     topFx.label,
+                reversed:  topFx.reversed,
+                remapKind: topFx.remapKind || "none",
+                topLevel:  true,
+                layer:     tl
+            });
             if (tl.source instanceof CompItem) {
                 walkPrecompForEffects(tl.source, [mainComp.name, tl.source.name], results);
             }
@@ -1597,6 +1732,104 @@ NOTES
         // realistic frame rate (240fps has 1/240 ≈ 4.2ms spacing) but loose
         // enough to catch AE's own floating-point drift on key insertion.
         var KEY_TIME_EPSILON_SEC = 0.0005;
+
+        // Prune a time-remap to within the layer's cut window.  AE's
+        // `precompose()` and `replaceSource()` both auto-extend a time-
+        // remapped layer's outPoint to encompass any keyframes that sit
+        // past the original outPoint — a behavior that hijacks the cut
+        // span when the user's complex remap has handle keys (or any keys
+        // outside the cut).  Removing those keys before the wrap / source
+        // swap is the only reliable way to keep the cut intact, since
+        // post-mutation `outPoint = ...` assignments get re-extended.
+        //
+        // The function:
+        //   1. Samples the curve at the cut boundaries (cutIn, cutOut)
+        //      using the original keys, so we capture the source-time
+        //      values the user's curve would have produced there.
+        //   2. Inserts boundary keys at cutIn and cutOut with those
+        //      sampled values, if not already present.
+        //   3. Forces LINEAR interpolation on the boundary keys so AE
+        //      doesn't apply Bezier eases that overshoot inside the cut.
+        //   4. Removes every key whose time falls outside the cut.
+        //
+        // Trade-offs for the user:
+        //   ✓ The curve INSIDE the cut is preserved exactly (interior
+        //     keys keep their values + interpolation + eases).
+        //   ✓ Editability is preserved — the user can still tweak keys
+        //     inside the cut after the roundtrip.
+        //   - Keys OUTSIDE the cut are gone.  They weren't visible
+        //     anyway (the cut bounds the visible window) but they're
+        //     no longer recoverable from this layer.
+        function pruneTimeRemapToCut(layer) {
+            if (!layer || !layer.timeRemapEnabled) return false;
+            var tr;
+            try { tr = layer.property("Time Remap"); } catch (eP) { return false; }
+            if (!tr) return false;
+
+            // Normalize cut bounds — negative-stretch layers report
+            // outPoint < inPoint.
+            var cutIn  = layer.inPoint;
+            var cutOut = layer.outPoint;
+            if (cutIn > cutOut) { var tmp = cutIn; cutIn = cutOut; cutOut = tmp; }
+            var cutDur = cutOut - cutIn;
+            if (cutDur <= 0) return false;
+
+            var EPS = 1e-3;   // ms-scale tolerance for boundary key matching
+
+            // Sample boundary values from the ORIGINAL curve before
+            // mutating any keys.  Eased segments need the surrounding
+            // keys intact for the sample to be accurate.
+            var srcAtCutIn  = 0;
+            var srcAtCutOut = 0;
+            try { srcAtCutIn  = tr.valueAtTime(cutIn,  false); } catch (eS1) {}
+            try { srcAtCutOut = tr.valueAtTime(cutOut, false); } catch (eS2) {}
+
+            // Detect existing boundary keys so we don't double-insert.
+            var hasCutInKey  = false;
+            var hasCutOutKey = false;
+            try {
+                for (var ki = 1; ki <= tr.numKeys; ki++) {
+                    var ktI = tr.keyTime(ki);
+                    if (Math.abs(ktI - cutIn)  < EPS) hasCutInKey  = true;
+                    if (Math.abs(ktI - cutOut) < EPS) hasCutOutKey = true;
+                }
+            } catch (eK) {}
+
+            // Insert boundary keys at cutIn / cutOut with sampled values.
+            if (!hasCutInKey)  { try { tr.setValueAtTime(cutIn,  srcAtCutIn);  } catch (eIK1) {} }
+            if (!hasCutOutKey) { try { tr.setValueAtTime(cutOut, srcAtCutOut); } catch (eIK2) {} }
+
+            // Force LINEAR on boundary keys.  For interior keys we leave
+            // the user's interpolation alone — that's what preserves the
+            // curve shape inside the cut.
+            try {
+                for (var kj = 1; kj <= tr.numKeys; kj++) {
+                    var ktJ = tr.keyTime(kj);
+                    if (Math.abs(ktJ - cutIn)  < EPS ||
+                        Math.abs(ktJ - cutOut) < EPS) {
+                        try {
+                            tr.setInterpolationTypeAtKey(kj,
+                                KeyframeInterpolationType.LINEAR,
+                                KeyframeInterpolationType.LINEAR);
+                        } catch (eL) {}
+                    }
+                }
+            } catch (eIM) {}
+
+            // Remove keys outside the cut.  Walk backwards so removeKey
+            // indices stay valid for the remaining keys.
+            try {
+                for (var kr = tr.numKeys; kr >= 1; kr--) {
+                    var ktR = 0;
+                    try { ktR = tr.keyTime(kr); } catch (eKT) { continue; }
+                    if (ktR < cutIn - EPS || ktR > cutOut + EPS) {
+                        try { tr.removeKey(kr); } catch (eRK) {}
+                    }
+                }
+            } catch (eRem) {}
+
+            return true;
+        }
 
         // Convert negative-stretch reversals to equivalent reversed time remaps.
         // A reversed time remap survives the roundtrip cleanly (mapTimeToSource
@@ -1734,6 +1967,33 @@ NOTES
                 return true;
             } catch (e) { return false; }
         }
+        // Recursive pruner — prunes complex remap keys to the cut
+        // window for every scan-relevant layer in a comp tree.  Called
+        // for nested precomps from applyTimeEffectConversions and for
+        // any precomp encountered later that hasn't been pruned yet.
+        function pruneAllComplexRemapsInComp(comp) {
+            if (!comp || !(comp instanceof CompItem)) return 0;
+            var n = 0;
+            for (var li = 1; li <= comp.numLayers; li++) {
+                var l;
+                try { l = comp.layer(li); } catch (e) { continue; }
+                if (!l || !isScanRelevantLayer(l)) continue;
+                var fx;
+                try { fx = describeTimeEffect(l); } catch (e) { fx = null; }
+                if (fx && fx.remapKind &&
+                    (fx.remapKind === "complex-forward" ||
+                     fx.remapKind === "complex-reverse")) {
+                    if (pruneTimeRemapToCut(l)) n++;
+                }
+                try {
+                    if (l.source instanceof CompItem) {
+                        n += pruneAllComplexRemapsInComp(l.source);
+                    }
+                } catch (eRec) {}
+            }
+            return n;
+        }
+
         function convertAllStretchReversalsInComp(comp) {
             var n = 0;
             for (var li = 1; li <= comp.numLayers; li++) {
@@ -2015,6 +2275,36 @@ NOTES
                     trAffected.push({ selIdx: ti, index: tl.index, name: tl.name, inPoint: tl.inPoint, outPoint: tl.outPoint,
                         label: topFx.label, reversed: topFx.reversed });
                 }
+            }
+
+            // Prune complex remap keys to the cut window BEFORE
+            // autoPrecomposeTrimmed wraps these layers.  AE's precompose()
+            // and downstream replaceSource() both auto-extend a time-
+            // remapped layer's outPoint to encompass any keyframes past
+            // outPoint — which makes the cut span balloon to whatever
+            // timestamp the user's furthest key sits at.  Removing those
+            // out-of-cut keys here means AE has nothing to extend to.
+            // Skips layers that came out of convertStretchReversalToRemap
+            // (those need their preTime/postTime handle keys to render
+            // through the handle range).  Distinguish by remapKind:
+            // simple-* are auto-default 2-key shapes (incl. convert
+            // output); complex-* are user-built curves with extra keys.
+            for (var pti = 0; pti < trAffected.length; pti++) {
+                var ptl = selLayers[trAffected[pti].selIdx].layer;
+                var ptFx = describeTimeEffect(ptl);
+                if (ptFx && ptFx.remapKind &&
+                    (ptFx.remapKind === "complex-forward" ||
+                     ptFx.remapKind === "complex-reverse")) {
+                    pruneTimeRemapToCut(ptl);
+                }
+                // Also recurse into precomp source for nested complex
+                // remaps (e.g. precomp wrapper has no remap but its
+                // inner layer does).
+                try {
+                    if (ptl.source instanceof CompItem) {
+                        pruneAllComplexRemapsInComp(ptl.source);
+                    }
+                } catch (ePR) {}
             }
 
             if (trAffected.length > 0) {
@@ -2658,20 +2948,36 @@ NOTES
                             var tr = L.property("Time Remap");
                             var nKeys = tr.numKeys;
                             if (nKeys >= 2) {
-                                // Snapshot values, then write mirrored.
-                                var vals = [];
-                                for (var k = 1; k <= nKeys; k++) {
-                                    try { vals.push(tr.keyValue(k)); }
-                                    catch (eKV) { vals.push(0); }
+                                // Vertical mirror: new_value = srcDur - old_value.
+                                // Preserves curve shape (hold frames, eased
+                                // segments) — just flips on the value axis.
+                                // The previous "positional" mirror swapped
+                                // values across keys (vals[nKeys-w]); that
+                                // works for the simple 2-key default but
+                                // corrupts complex curves by migrating holds
+                                // / eased segments to wrong key positions,
+                                // producing black or out-of-range remap output.
+                                //
+                                // Both schemes give the same result for
+                                // simple 2-key descending (srcDur, 0) — both
+                                // yield (0, srcDur) — so the simple-reverse
+                                // case is unchanged.
+                                var lSrcDur = (L.source && L.source.duration) ? L.source.duration : 0;
+                                if (lSrcDur > 0) {
+                                    for (var w = 1; w <= nKeys; w++) {
+                                        try {
+                                            var newV = lSrcDur - tr.keyValue(w);
+                                            if (newV < 0)        newV = 0;
+                                            if (newV > lSrcDur)  newV = lSrcDur;
+                                            tr.setValueAtKey(w, newV);
+                                        } catch (eSV) {}
+                                    }
                                 }
-                                for (var w = 1; w <= nKeys; w++) {
-                                    try { tr.setValueAtKey(w, vals[nKeys - w]); } catch (eSV) {}
-                                }
-                                // Force linear so playback is constant-
-                                // speed forward, matching the bake.
-                                for (var iw = 1; iw <= nKeys; iw++) {
-                                    try { tr.setInterpolationTypeAtKey(iw, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.LINEAR); } catch (eIK) {}
-                                }
+                                // Don't force linear: that flattens user's
+                                // eased segments and changes the curve
+                                // shape.  Simple 2-key default is already
+                                // linear, so no change needed there.
+                                // Complex curves keep their easing handles.
                             }
                         }
                         if (L.source instanceof CompItem) {
@@ -2959,6 +3265,21 @@ NOTES
                 // the markers collapse to the same instant instead of crossing.
                 if (cutDuration < 0) cutDuration = 0;
 
+                // AE's workAreaDuration setter requires >= one frame.  When the
+                // layer has a complex / hold-frame time remap the source range
+                // can collapse to zero (or sub-frame), which crashes the
+                // setter with a "Value out of range" error.  Clamp to one
+                // frame, then back off cutStart if needed to stay inside
+                // safeDuration.  Markers still land at the original cut
+                // boundaries; only the work-area highlight nudges to a
+                // single visible frame.
+                var minWADur = 1.0 / safeFPS;
+                if (cutDuration < minWADur) cutDuration = minWADur;
+                if (cutStart + cutDuration > safeDuration) {
+                    cutStart    = Math.max(0, safeDuration - cutDuration);
+                    if (cutStart + cutDuration > safeDuration) cutDuration = safeDuration - cutStart;
+                }
+
                 // Work area = EDITORIAL CUT only (not cut+handles) so RAM
                 // preview and UI focus land on the visible cut. The render
                 // queue uses explicit timeSpanStart/Duration below, so the
@@ -3000,6 +3321,30 @@ NOTES
                             layer.inPoint   = origInPointPC;
                             layer.outPoint  = origOutPointPC;
                         } catch (eTimingPC) {}
+
+                        // Trim the WRAPPED inner layer's outPoint back to the
+                        // cut span.  AE's precompose() will silently extend
+                        // the inner layer's outPoint to include the last
+                        // time-remap key — fine for default 2-key remaps,
+                        // catastrophic for complex / partially-reversed
+                        // curves where the last key may sit tens of seconds
+                        // past the cut end.  Symptom: shot_xxx_comp ends up
+                        // 33 s long when the cut is 1.28 s, which throws the
+                        // bake render and every downstream marker / handle
+                        // calculation off.  Force the inner to the cut span;
+                        // keys past outPoint stay on the property but no
+                        // longer drive playback.
+                        try {
+                            var innerHostComp = layer.source;
+                            if (innerHostComp && innerHostComp instanceof CompItem &&
+                                innerHostComp.numLayers >= 1) {
+                                var innerCutLayer = innerHostComp.layer(1);
+                                var innerCutDur   = origOutPointPC - origInPointPC;
+                                if (innerCutDur > 0) {
+                                    innerCutLayer.outPoint = innerCutLayer.inPoint + innerCutDur;
+                                }
+                            }
+                        } catch (eTrimInner) {}
                         try { layer.label = origLabelPC; } catch (eLblPC1) {}
                         // Single-shot precomp → shot bin. Multi-footage container's
                         // per-range bin is handled by the rename block below.
@@ -3153,7 +3498,112 @@ NOTES
                     plateInner.property("Marker").setValueAtTime(cutStart, cutMarker("cut in"));
                     plateInner.property("Marker").setValueAtTime(cutStart + cutDuration, cutMarker("cut out"));
 
+                    // Snapshot the footage layer's CURRENT in/out (and the
+                    // pre-replaceSource flag for whether time-remap was on)
+                    // before the replaceSource below.  AE silently re-extends
+                    // a time-remapped layer's outPoint when its source is
+                    // swapped, clipping to the new source / containing comp
+                    // duration.  Without this snapshot, the post-replace
+                    // logic at "Trim the footageLayer" reads the corrupted
+                    // values and re-applies them, which makes the inner
+                    // layer span the entire container instead of the cut.
+                    var preReplaceInP   = 0, preReplaceOutP = 0;
+                    var preReplaceTREnb = false;
+                    var preReplaceStr   = 100;
+                    try { preReplaceInP   = footageLayer.inPoint;          } catch (e) {}
+                    try { preReplaceOutP  = footageLayer.outPoint;         } catch (e) {}
+                    try { preReplaceTREnb = footageLayer.timeRemapEnabled; } catch (e) {}
+                    try { preReplaceStr   = footageLayer.stretch;          } catch (e) {}
+
+                    // Defensive prune: if the layer has a complex remap
+                    // that wasn't already pruned upstream (e.g. it lives
+                    // in a precomp that wasn't in trAffected), trim its
+                    // out-of-cut keys before replaceSource.  AE's auto-
+                    // extension during replaceSource only fires when
+                    // there are keys past outPoint.
+                    try {
+                        var prFx = describeTimeEffect(footageLayer);
+                        if (prFx && prFx.remapKind &&
+                            (prFx.remapKind === "complex-forward" ||
+                             prFx.remapKind === "complex-reverse")) {
+                            pruneTimeRemapToCut(footageLayer);
+                        }
+                    } catch (ePD) {}
+
                     footageLayer.replaceSource(shotComp, false);
+
+                    // AE's replaceSource on a time-remapped layer auto-inserts
+                    // boundary keys at startTime (v=0) and startTime+srcDur
+                    // (v=srcDur) to make the timeRemap span the new source —
+                    // even if Path C pruned them upstream.  Those auto-keys
+                    // sit OUTSIDE the cut, so AE then auto-extends layer.
+                    // outPoint to the last (auto-added) key, ballooning the
+                    // cut span back out.  Strip them in PRE-replaceSource
+                    // cut bounds before we touch inPoint/outPoint, so the
+                    // subsequent `outPoint = flCutOut` assignment has no
+                    // out-of-cut keys to extend toward.
+                    if (preReplaceTREnb) {
+                        var prCutIn  = preReplaceInP;
+                        var prCutOut = preReplaceOutP;
+                        if (prCutIn > prCutOut) { var prTmp = prCutIn; prCutIn = prCutOut; prCutOut = prTmp; }
+                        try {
+                            var prTr = footageLayer.property("Time Remap");
+                            if (prTr) {
+                                var prEPS = 1e-3;
+                                for (var prk = prTr.numKeys; prk >= 1; prk--) {
+                                    var prkt;
+                                    try { prkt = prTr.keyTime(prk); } catch (eprkt) { continue; }
+                                    if (prkt < prCutIn - prEPS || prkt > prCutOut + prEPS) {
+                                        try { prTr.removeKey(prk); } catch (eprrk) {}
+                                    }
+                                }
+                                // Dedupe AE-auto boundary keys: AE inserts a key at
+                                // exact layer.startTime with v = 0 (or v = srcDur for
+                                // descending) to span the new source.  Floating-point
+                                // drift between layer.startTime and our cutIn means
+                                // the auto-key sits ALONGSIDE the user/convert key
+                                // instead of overwriting it — yielding two keys 0.0001s
+                                // apart with wildly different values, which AE
+                                // interprets as a near-instantaneous jump (huge ease
+                                // slope).  At each cut boundary, when 2+ keys cluster
+                                // within EPS, remove whichever sits closer to the AE-
+                                // auto shape (value ≈ 0 or value ≈ source.duration —
+                                // checking BOTH the layer's current source and the
+                                // pre-replaceSource source, since AE may have used
+                                // the old duration when inserting).
+                                var srcDurNew = (footageLayer.source && footageLayer.source.duration) ? footageLayer.source.duration : 0;
+                                var srcDurOld = (source && source.duration) ? source.duration : 0;
+                                var prVTOL    = 0.5; // half-second value tolerance — AE-auto values are within a frame of 0/srcDur
+                                var _autoness = function (v) {
+                                    var d0   = Math.abs(v);
+                                    var dNew = (srcDurNew > 0) ? Math.abs(v - srcDurNew) : Infinity;
+                                    var dOld = (srcDurOld > 0) ? Math.abs(v - srcDurOld) : Infinity;
+                                    return Math.min(d0, dNew, dOld);
+                                };
+                                var _dedupeAt = function (t) {
+                                    var hits = [];
+                                    for (var hi = 1; hi <= prTr.numKeys; hi++) {
+                                        var ht;
+                                        try { ht = prTr.keyTime(hi); } catch (eHt) { continue; }
+                                        if (Math.abs(ht - t) < prEPS) hits.push(hi);
+                                    }
+                                    if (hits.length < 2) return;
+                                    var worstIdx = -1, worstScore = Infinity;
+                                    for (var di = 0; di < hits.length; di++) {
+                                        var dv;
+                                        try { dv = prTr.keyValue(hits[di]); } catch (eDv) { continue; }
+                                        var score = _autoness(dv);
+                                        if (score < worstScore) { worstScore = score; worstIdx = hits[di]; }
+                                    }
+                                    if (worstIdx > 0 && worstScore < prVTOL) {
+                                        try { prTr.removeKey(worstIdx); } catch (eRD) {}
+                                    }
+                                };
+                                _dedupeAt(prCutIn);
+                                _dedupeAt(prCutOut);
+                            }
+                        } catch (ePostPrune) {}
+                    }
 
                     // Shared-mode rename of the shared inner precomp (e.g.
                     // "Cloud Space slow") so OTHER mainComp references that
@@ -3186,12 +3636,16 @@ NOTES
                     // stops reconstructing cleanly.
                     var flCutIn = 0, flCutOut = 0;
                     try {
-                        var flStretch = (footageLayer.stretch !== 0) ? footageLayer.stretch : 100;
-                        if (footageLayer.timeRemapEnabled) {
+                        var flStretch = (preReplaceStr !== 0) ? preReplaceStr : 100;
+                        if (preReplaceTREnb) {
                             // Source→comp mapping is nonlinear for time-remapped layers.
-                            // The footage layer's in/out are already the cut bounds in comp time.
-                            flCutIn  = footageLayer.inPoint;
-                            flCutOut = footageLayer.outPoint;
+                            // Use the PRE-replaceSource in/out — they are the cut bounds
+                            // the user established.  Reading footageLayer.inPoint /
+                            // outPoint here would pick up AE's post-replace auto-
+                            // extension, which collapses the layer to the entire
+                            // container span and erases the cut trim.
+                            flCutIn  = preReplaceInP;
+                            flCutOut = preReplaceOutP;
                         } else {
                             flCutIn  = footageLayer.startTime + cutStart * (flStretch / 100);
                             flCutOut = footageLayer.startTime + (cutStart + cutDuration) * (flStretch / 100);
@@ -3278,6 +3732,68 @@ NOTES
 
                     if (containerInner) {
                         containerInner.replaceSource(shotComp, false);
+
+                        // AE may auto-enable timeRemap on replaceSource when
+                        // the new source duration differs from the original,
+                        // and inserts boundary keys at startTime / startTime+
+                        // srcDur to span the new source.  Those keys sit
+                        // outside the cut+handles span we want; strip any
+                        // out-of-cut keys before we set inPoint/outPoint
+                        // so AE can't auto-extend the layer back out.
+                        try {
+                            if (containerInner.timeRemapEnabled) {
+                                var ciTr = containerInner.property("Time Remap");
+                                if (ciTr) {
+                                    var ciCutIn  = fullStart;
+                                    var ciCutOut = fullStart + fullDurationSec;
+                                    var ciEPS    = 1e-3;
+                                    for (var cik = ciTr.numKeys; cik >= 1; cik--) {
+                                        var cikt;
+                                        try { cikt = ciTr.keyTime(cik); } catch (ecikt) { continue; }
+                                        if (cikt < ciCutIn - ciEPS || cikt > ciCutOut + ciEPS) {
+                                            try { ciTr.removeKey(cik); } catch (ecirk) {}
+                                        }
+                                    }
+                                    // Dedupe AE-auto boundary keys (see comment in
+                                    // precomp branch above for the full rationale —
+                                    // AE inserts a v=0 / v=srcDur key at exact
+                                    // startTime that drifts alongside our user key
+                                    // by floating-point sub-EPS, producing duplicate
+                                    // keys with wild ease slopes).
+                                    var ciSrcDurNew = (containerInner.source && containerInner.source.duration) ? containerInner.source.duration : 0;
+                                    var ciSrcDurOld = (source && source.duration) ? source.duration : 0;
+                                    var ciVTOL      = 0.5;
+                                    var _ciAutoness = function (v) {
+                                        var d0   = Math.abs(v);
+                                        var dNew = (ciSrcDurNew > 0) ? Math.abs(v - ciSrcDurNew) : Infinity;
+                                        var dOld = (ciSrcDurOld > 0) ? Math.abs(v - ciSrcDurOld) : Infinity;
+                                        return Math.min(d0, dNew, dOld);
+                                    };
+                                    var _ciDedupeAt = function (t) {
+                                        var hits = [];
+                                        for (var hi = 1; hi <= ciTr.numKeys; hi++) {
+                                            var ht;
+                                            try { ht = ciTr.keyTime(hi); } catch (eHt) { continue; }
+                                            if (Math.abs(ht - t) < ciEPS) hits.push(hi);
+                                        }
+                                        if (hits.length < 2) return;
+                                        var worstIdx = -1, worstScore = Infinity;
+                                        for (var di = 0; di < hits.length; di++) {
+                                            var dv;
+                                            try { dv = ciTr.keyValue(hits[di]); } catch (eDv) { continue; }
+                                            var score = _ciAutoness(dv);
+                                            if (score < worstScore) { worstScore = score; worstIdx = hits[di]; }
+                                        }
+                                        if (worstIdx > 0 && worstScore < ciVTOL) {
+                                            try { ciTr.removeKey(worstIdx); } catch (eRD) {}
+                                        }
+                                    };
+                                    _ciDedupeAt(ciCutIn);
+                                    _ciDedupeAt(ciCutOut);
+                                }
+                            }
+                        } catch (ePostPruneCI) {}
+
                         // startTime=0 lines container time up with shotComp
                         // (= source) time. Trim inPoint/outPoint to the clip +
                         // handles span so the layer in the container only

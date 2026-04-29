@@ -75,6 +75,13 @@
             label:  "Create dynamicLink Comps",
             tip:    "Standalone dynamicLink builder. Prompts for handle frames, then for each selected precomp or footage layer creates a wrapper comp with full cut + 2× handles duration (black padded) in /Shots/dynamicLink.",
             file:   "create-dynamiclink-comps/create_dynamiclink_comps.jsx"
+        },
+        {
+            group:  "Diagnostics",
+            icon:   "⌕",
+            label:  "Dump Timing State",
+            tip:    "Read-only snapshot of every layer's timing state in the active comp + every nested precomp. Captures inPoint/outPoint/startTime, time stretch, time-remap keyframes (time/value/interp/ease), source duration, layer markers, and parent linkage. Run BEFORE and AFTER each roundtrip phase, tag each snapshot, then diff the resulting text files to see exactly what changed. Useful for debugging time-remap / time-reverse handling on footage layers and nested precomps. Dump file is saved next to the .aep.",
+            file:   "diagnostics/dump_timing_state.jsx"
         }
     ];
 
@@ -82,8 +89,9 @@
     // ScriptUI may ignore this on macOS Aqua-styled buttons; if icons come out
     // grey everywhere, switch to iconbutton + PNG assets.
     var GROUP_COLORS = {
-        "Roundtrip":  [0.45, 0.75, 1.00, 1.0], // cyan-ish
-        "Project":    [0.95, 0.85, 0.45, 1.0]  // gold
+        "Roundtrip":   [0.45, 0.75, 1.00, 1.0], // cyan-ish
+        "Project":     [0.95, 0.85, 0.45, 1.0], // gold
+        "Diagnostics": [0.70, 0.70, 0.70, 1.0]  // neutral grey — read-only debug tools
     };
 
     function buttonLabel(script) {
@@ -148,7 +156,7 @@
         brandCol.orientation = "column";
         brandCol.alignment = ["left", "center"];
         brandCol.spacing = 2;
-        var buildDate = brandCol.add("statictext", undefined, "20260428");
+        var buildDate = brandCol.add("statictext", undefined, "20260429");
         // NOTE to editor: keep this date in sync with ship day (YYYYMMDD).
         buildDate.graphics.font = ScriptUI.newFont("Helvetica", "REGULAR", 11);
         buildDate.graphics.foregroundColor = buildDate.graphics.newPen(buildDate.graphics.PenType.SOLID_COLOR, [0.55, 0.55, 0.55, 1], 1);

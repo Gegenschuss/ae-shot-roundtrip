@@ -519,6 +519,26 @@ comp (vs. the layer-scoped Roundtrip tools above). Live in the panel's
   on the Burnin layer in mainComp (or on individual layers inside the
   Burnin precomp) manually. No helper script — mainComp is the render
   target, so configuration lives there.
+
+### Diagnostics
+
+- **Dump Timing State** — read-only snapshot of every layer's timing
+  state in the active comp + every nested precomp. Captures
+  `inPoint`/`outPoint`/`startTime`/`duration`, time stretch, time-remap
+  keyframes (time/value/interpolation/ease), source duration, layer
+  markers, and parent linkage. Tags layers with any time effect as
+  `[TIME-EFFECT]` so they're easy to grep.
+
+  Run BEFORE and AFTER each roundtrip phase, tag each snapshot
+  (e.g. "before", "after"), then diff the resulting text files to
+  see exactly what changed. The dump file lands next to the `.aep`
+  as `timing_dump_<comp>_<tag>.txt`.
+
+  Useful when troubleshooting time-remap / time-reverse handling on
+  footage layers and nested precomps — comparing dumps usually pins
+  down exactly which layer's `outPoint` got auto-extended or which
+  remap keys drifted.
+
 ### Companion repos
 
 Two sibling panels ship as their own repos. Install whichever you need
